@@ -1,0 +1,3 @@
+- insert:
+    - id: ui-settings-sync
+      name: '@linbin-mk/dsh-client-ui-settings-sync'

@@ -1,0 +1,57 @@
+/* Sync status footer action, in the sidebar foot rhythm: a 34px compact row
+ * (wide) collapsing to a 36x36 rail circle, with a 8px health dot.
+ *
+ * Every color resolves through a `--dsw-alias-*` token. */
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  cursor: default;
+}
+
+.status:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* Rail posture: the same 36x36 circle box as the other rail controls. */
+.status.rail {
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 50%;
+}
+
+.dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.dot.normal {
+  background: var(--dsw-alias-state-success-primary);
+}
+
+.dot.abnormal {
+  background: var(--dsw-alias-state-error-primary);
+}
+
+.dot.syncing {
+  background: var(--dsw-alias-label-tertiary);
+}
+
+.label {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

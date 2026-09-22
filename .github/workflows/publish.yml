@@ -1,0 +1,128 @@
+# Publish both packages to npm from a GitHub Release.
+#
+# Authentication uses npm trusted publishing (OIDC), so no NPM_TOKEN secret is
+# stored in this repository. Every published package needs its own connection on
+# npm, configured once:
+#
+#   Package → Settings → Trusted Publisher → GitHub Actions
+#     Organization or user : linbin-mk
+#     Repository           : dsh-session-sync
+#     Workflow filename    : publish.yml
+#     Environment          : (leave empty)
+#     Allow npm publish    : CHECKED
+#
+# The checkbox matters: npm's form grants only *staged* publishing unless
+# "Allow npm publish" is ticked, and a staged publish leaves CI green while
+# nothing reaches the registry. After saving, the connection must list both
+# `npm publish` and `npm stage publish`.
+#
+# npm has no pending-publisher concept, so the first version of each package
+# must be published by hand before this workflow can take over.
+#
+# Releasing: bump "version" in all three manifests, commit, tag `v<version>`,
+# push the tag, then publish a GitHub Release for that tag. The tag must agree
+# with every manifest, and a version already on the registry is skipped — so a
+# manual `workflow_dispatch` run is a safe rehearsal that only builds and tests.
+
+name: publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: macos-latest
+    permissions:
+      contents: read
+      id-token: write # Required for npm trusted publishing and provenance.
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+
+      - name: Require npm 11.5.1 or later for trusted publishing
+        run: |
+          node -e '
+            const { execSync } = require("node:child_process")
+            const version = execSync("npm --version").toString().trim()
+            console.log(`npm ${version}`)
+            const [major, minor] = version.split(".").map(Number)
+            if (major < 11 || (major === 11 && minor < 5)) {
+              console.error("npm 11.5.1 or later is required for trusted publishing")
+              process.exit(1)
+            }
+          '
+
+      - run: pnpm install --frozen-lockfile
+
+      # The published tarballs are built artifacts (`lib/` is not committed), so
+      # the build is an explicit release step. Each package's own `test` script
+      # builds it again first, which keeps a bare `pnpm test` working on a fresh
+      # clone — the suites import the packages through their public entry points.
+      - run: pnpm build
+
+      - run: pnpm test
+
+      - name: Check the release tag against every manifest
+        if: ${{ github.event_name == 'release' }}
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          node -e '
+            const fs = require("node:fs")
+            const manifests = [
+              "package.json",
+              "packages/session-sync/package.json",
+              "packages/client-ui-settings-sync/package.json",
+            ]
+            const tag = process.env.RELEASE_TAG
+            const versions = manifests.map(file => [file, JSON.parse(fs.readFileSync(file, "utf8")).version])
+            for (const [file, version] of versions) console.log(`${file}: ${version}`)
+            const mismatched = versions.filter(([, version]) => `v${version}` !== tag)
+            if (mismatched.length > 0) {
+              console.error(`release tag ${tag} disagrees with ${mismatched.map(([file, version]) => `${file} (${version})`).join(", ")}`)
+              process.exit(1)
+            }
+            console.log(`release tag ${tag} matches every manifest`)
+          '
+
+      # Dependency order matters: the browser package peer-depends on the host
+      # package, so the host half must exist on the registry first.
+      - name: Publish every package that is not on the registry yet
+        if: ${{ github.event_name == 'release' }}
+        run: |
+          set -eu
+          for dir in packages/session-sync packages/client-ui-settings-sync; do
+            name=$(node -p "require('./$dir/package.json').name")
+            version=$(node -p "require('./$dir/package.json').version")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version is already on the registry — skipping"
+              continue
+            fi
+            echo "publishing $name@$version"
+            # A workspace self-reference is a pnpm-only spelling that npm would
+            # publish verbatim, so the manifest copy npm sends must not carry it.
+            # The original is restored right after the publish.
+            ( cd "$dir" && npm pkg delete "devDependencies.$name" >/dev/null 2>&1 || true )
+            ( cd "$dir" && npm publish --ignore-scripts --provenance --access public )
+            git checkout -- "$dir/package.json"
+          done

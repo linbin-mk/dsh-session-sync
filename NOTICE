@@ -1,0 +1,60 @@
+dsh-session-sync
+Copyright (c) 2026 linbin-mk
+
+This distribution includes the third-party material listed below. Each entry
+reproduces the copyright notice and license text that its license requires.
+
+================================================================================
+packages/client-ui-settings-sync/src/client/store.ts — DeepSeek Harness snapshot store
+================================================================================
+
+This file is a trimmed copy of the DeepSeek Harness snapshot-store engine
+(packages/client/store). It keeps `createSnapshotStore` plus the `SnapshotStore`
+type — zustand vanilla + immer `produce` + `subscribeWithSelector`, reduced to
+the bare `{ getSnapshot, subscribe }` observable this plugin's settings page
+needs. It is vendored rather than depended on because the published
+`@deepseek-ai/dsh-client-store` ships that surface only as a browser bundle,
+which a Node-side test cannot import. The file carries the same attribution in
+its header comment.
+
+MIT License
+
+Copyright (c) 2026 DeepSeek
+
+================================================================================
+packages/client-ui-settings-sync/lib/client.js — bundled npm dependencies
+================================================================================
+
+The browser bundle is built with `tsdown` and inlines the libraries below at
+build time (they are ordinary libraries a browser bundle may inline, as opposed
+to the platform modules the Harness module table answers). Their compiled code
+is part of the distributed artifact.
+
+  zustand 4.4.7 — Copyright (c) 2019 Paul Henschel
+  immer 10.2.0 — Copyright (c) 2017 Michel Weststrate
+  clsx 2.1.1 — Copyright (c) Luke Edwards <luke.edwards05@gmail.com> (lukeed.com)
+
+Each of the three packages above is distributed under the MIT License, whose
+terms are reproduced once below and apply to each of them.
+
+================================================================================
+MIT License (applies to every entry in this file)
+================================================================================
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

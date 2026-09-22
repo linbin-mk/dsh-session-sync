@@ -1,0 +1,42 @@
+{
+  "name": "dsh-session-sync",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Third-party session-sync plugin for DeepSeek Harness: git-backed cross-machine session sync with its own web settings surface",
+  "license": "MIT",
+  "type": "module",
+  "author": "linbin-mk (https://github.com/linbin-mk)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/linbin-mk/dsh-session-sync.git"
+  },
+  "homepage": "https://github.com/linbin-mk/dsh-session-sync#readme",
+  "bugs": {
+    "url": "https://github.com/linbin-mk/dsh-session-sync/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek",
+    "deepseek-harness",
+    "cordis",
+    "session-sync",
+    "session",
+    "sync",
+    "git",
+    "cross-machine",
+    "typescript"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "typecheck": "pnpm --filter @linbin-mk/dsh-session-sync build && pnpm -r typecheck",
+    "test": "pnpm -r test"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.8"
+  }
+}

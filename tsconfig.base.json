@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "es2024",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "declaration": true,
+    "sourceMap": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    "types": ["node"],
+    "paths": {
+      "@linbin-mk/dsh-client-ui-settings-sync": ["./packages/client-ui-settings-sync/src/index.ts"],
+      "@linbin-mk/dsh-client-ui-settings-sync/client": ["./packages/client-ui-settings-sync/src/client/index.ts"]
+    }
+  }
+}
