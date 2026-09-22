@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-sync",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Third-party session-sync plugin for DeepSeek Harness: git-backed cross-machine session sync with its own web settings surface",
   "license": "MIT",
