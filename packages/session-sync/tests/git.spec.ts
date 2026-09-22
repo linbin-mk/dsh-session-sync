@@ -27,8 +27,19 @@ async function newRoot(prefix: string): Promise<string> {
   return root
 }
 
+/**
+ * A bare remote whose default branch is pinned to `main`.
+ *
+ * `git init --bare` otherwise inherits the ambient `init.defaultBranch`, which
+ * is `main` on a machine that sets it and unset (`master`) on a fresh CI runner.
+ * The plugin is always configured with branch `main`, so an inherited `master`
+ * HEAD leaves the bare remote pointing at a ref that never materializes and a
+ * later plain `git clone` checks nothing out.
+ * @param dir - directory to initialize.
+ * @returns the same directory, for chaining.
+ */
 async function initBare(dir: string): Promise<string> {
-  await execFileAsync('git', ['init', '--bare', dir])
+  await execFileAsync('git', ['init', '--bare', '-b', 'main', dir])
   return dir
 }
 

@@ -189,6 +189,16 @@ afterEach(async () => {
   else process.env.DSH_HOME = previousDshHome
 })
 
+/**
+ * Every bare fixture in this file is created with an explicit `-b main`.
+ *
+ * `git init --bare` otherwise inherits the ambient `init.defaultBranch`, which
+ * is `main` on a machine that sets it and unset (`master`) on a fresh CI runner.
+ * The plugin is always configured with branch `main`, so an inherited `master`
+ * HEAD leaves the bare remote pointing at a ref that never materializes and a
+ * later plain `git clone` checks nothing out — this suite passed locally and
+ * failed on CI for exactly that reason.
+ */
 describe('SessionSyncService', () => {
   it('reports an unconfigured plugin and records the reason on manual sync', async () => {
     previousDshHome = process.env.DSH_HOME
@@ -214,7 +224,7 @@ describe('SessionSyncService', () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-sync-service-remote-'))
     roots.push(root)
     const bare = join(root, 'remote.git')
-    await execFileAsync('git', ['init', '--bare', bare])
+    await execFileAsync('git', ['init', '--bare', '-b', 'main', bare])
     const project = join(root, 'project')
     await mkdir(project, { recursive: true })
 
@@ -266,7 +276,7 @@ describe('SessionSyncService', () => {
       const root = await mkdtemp(join(tmpdir(), 'dsh-sync-service-interval-'))
       roots.push(root)
       const bare = join(root, 'remote.git')
-      await execFileAsync('git', ['init', '--bare', bare])
+      await execFileAsync('git', ['init', '--bare', '-b', 'main', bare])
       const project = join(root, 'project')
       await mkdir(project, { recursive: true })
 
@@ -305,7 +315,7 @@ describe('SessionSyncService', () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-sync-service-noraw-'))
     roots.push(root)
     const bare = join(root, 'remote.git')
-    await execFileAsync('git', ['init', '--bare', bare])
+    await execFileAsync('git', ['init', '--bare', '-b', 'main', bare])
     const project = join(root, 'project')
     await mkdir(project, { recursive: true })
 
@@ -331,7 +341,7 @@ describe('SessionSyncService', () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-sync-service-contained-'))
     roots.push(root)
     const bare = join(root, 'remote.git')
-    await execFileAsync('git', ['init', '--bare', bare])
+    await execFileAsync('git', ['init', '--bare', '-b', 'main', bare])
     const project = join(root, 'project')
     await mkdir(project, { recursive: true })
 
@@ -368,7 +378,7 @@ describe('SessionSyncService', () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-sync-service-fs-'))
     roots.push(root)
     const bare = join(root, 'remote.git')
-    await execFileAsync('git', ['init', '--bare', bare])
+    await execFileAsync('git', ['init', '--bare', '-b', 'main', bare])
     const project = join(root, 'project')
     await mkdir(project, { recursive: true })
 
@@ -399,7 +409,7 @@ describe('SessionSyncService', () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-sync-service-warm-'))
     roots.push(root)
     const bare = join(root, 'remote.git')
-    await execFileAsync('git', ['init', '--bare', bare])
+    await execFileAsync('git', ['init', '--bare', '-b', 'main', bare])
     const project = join(root, 'project')
     await mkdir(project, { recursive: true })
 
@@ -466,7 +476,7 @@ describe('SessionSyncService', () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-sync-service-notice-'))
     roots.push(root)
     const bare = join(root, 'remote.git')
-    await execFileAsync('git', ['init', '--bare', bare])
+    await execFileAsync('git', ['init', '--bare', '-b', 'main', bare])
     const project = join(root, 'project')
     await mkdir(project, { recursive: true })
 
@@ -543,7 +553,7 @@ describe('SessionSyncService', () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-sync-service-notice-restart-'))
     roots.push(root)
     const bare = join(root, 'remote.git')
-    await execFileAsync('git', ['init', '--bare', bare])
+    await execFileAsync('git', ['init', '--bare', '-b', 'main', bare])
     const project = join(root, 'project')
     await mkdir(project, { recursive: true })
 
@@ -633,7 +643,7 @@ describe('SessionSyncService', () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-sync-service-cleanup-'))
     roots.push(root)
     const bare = join(root, 'remote.git')
-    await execFileAsync('git', ['init', '--bare', bare])
+    await execFileAsync('git', ['init', '--bare', '-b', 'main', bare])
 
     const { service } = await compose({
       document: {
@@ -701,7 +711,7 @@ describe('SessionSyncService', () => {
       const root = await mkdtemp(join(tmpdir(), 'dsh-sync-service-cleanup-period-'))
       roots.push(root)
       const bare = join(root, 'remote.git')
-      await execFileAsync('git', ['init', '--bare', bare])
+      await execFileAsync('git', ['init', '--bare', '-b', 'main', bare])
 
       const { service } = await compose({
         document: {

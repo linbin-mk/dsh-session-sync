@@ -151,7 +151,10 @@ describe('session-sync Loader composition', () => {
     await mkdir(projA, { recursive: true })
     await mkdir(projB, { recursive: true })
     const bare = join(setup, 'remote.git')
-    await execFileAsync('git', ['init', '--bare', bare])
+    // `-b main` is load-bearing: without it the bare remote inherits the ambient
+    // `init.defaultBranch` (`master` on a fresh CI runner) while the plugin
+    // pushes `main`, and this machine-B clone below then checks nothing out.
+    await execFileAsync('git', ['init', '--bare', '-b', 'main', bare])
 
     // Machine A: create one session, configure the mapping, sync it out.
     process.env.DSH_HOME = homeA
