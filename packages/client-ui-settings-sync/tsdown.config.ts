@@ -17,7 +17,8 @@
  * build error.
  */
 import { readFile } from 'node:fs/promises'
-import { basename, dirname, resolve as resolvePath } from 'node:path'
+import { basename, dirname, relative, resolve as resolvePath } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { UserConfig } from 'tsdown'
 import { transform } from 'lightningcss'
 
@@ -44,6 +45,16 @@ const GENERATED_REMOTE = /^@deepseek-ai\/dsh-[a-z0-9]+(?:-[a-z0-9]+)*\/remote$/
 
 const CSS_VIRTUAL_PREFIX = '\0dsh-css:'
 const CSS_VIRTUAL_SUFFIX = '.mjs'
+
+/**
+ * Directory this config lives in, used as the base for the CSS virtual ids.
+ *
+ * The bundler names its `//#region` comments after the module id, so an
+ * absolute virtual id would bake the builder's own path into the published
+ * bundle (`/Users/<name>/...` locally, `/Users/runner/work/...` on CI) and make
+ * the artifact differ per machine. Ids are therefore relative to this package.
+ */
+const BUNDLE_ROOT = dirname(fileURLToPath(import.meta.url))
 
 /** The Node half: the loader-importable library entries from the tsc-emitted files. */
 const libConfig: UserConfig = {
@@ -101,22 +112,34 @@ const clientConfig: UserConfig = {
       name: 'dsh-css-modules-inline',
       resolveId(source: string, importer: string | undefined) {
         if (!source.endsWith('.module.css')) return null
-        const abs = importer !== undefined ? resolvePath(dirname(importer), source) : source
-        return CSS_VIRTUAL_PREFIX + abs + CSS_VIRTUAL_SUFFIX
+        const abs = importer !== undefined ? resolvePath(dirname(importer), source) : resolvePath(source)
+        // Relative on purpose: this id is what the bundler prints in its
+        // `//#region` comments, so an absolute one would publish the build path.
+        return CSS_VIRTUAL_PREFIX + relative(BUNDLE_ROOT, abs) + CSS_VIRTUAL_SUFFIX
       },
       async load(virtualId: string) {
         if (!virtualId.startsWith(CSS_VIRTUAL_PREFIX)) return null
-        const fileId = virtualId.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
+        const relativeId = virtualId.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
+        const fileId = resolvePath(BUNDLE_ROOT, relativeId)
         this.addWatchFile(fileId)
         const source = await readFile(fileId)
         const { code, exports: cssExports } = transform({
-          filename: fileId,
+          // The package-relative path, not the absolute one: lightningcss folds
+          // the filename into its CSS-modules `[hash]`, so an absolute path
+          // makes every class name depend on where the bundle was built.
+          filename: relativeId,
           code: source,
           cssModules: { pattern: '[hash]_[local]' },
           minify: true,
         })
         const classMap: Record<string, string> = {}
-        for (const [local, exp] of Object.entries(cssExports ?? {})) classMap[local] = exp.name
+        // Sorted, with an explicit comparator: lightningcss hands the exports
+        // back in an arbitrary order, so emitting them as-is makes the bundle
+        // differ between two builds of identical input. `localeCompare` is
+        // avoided on purpose — it would reintroduce a machine dependency.
+        const entries = Object.entries(cssExports ?? {})
+          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        for (const [local, exp] of entries) classMap[local] = exp.name
         // One <style data-plugin> per module file; idempotent under re-evaluation.
         return [
           `const css = ${JSON.stringify(code.toString())};`,
