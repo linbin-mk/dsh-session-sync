@@ -83,8 +83,8 @@ pnpm --dir packages/session-sync pack
 pnpm --dir packages/client-ui-settings-sync pack
 
 dsh plugin --profile web-sync add \
-  ./linbin-mk-dsh-session-sync-0.1.0.tgz \
-  ./linbin-mk-dsh-client-ui-settings-sync-0.1.0.tgz
+  ./linbin-mk-dsh-session-sync-0.1.1.tgz \
+  ./linbin-mk-dsh-client-ui-settings-sync-0.1.1.tgz
 ```
 
 从同一个 profile 移除：
