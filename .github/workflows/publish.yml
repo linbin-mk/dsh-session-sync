@@ -119,10 +119,11 @@ jobs:
               continue
             fi
             echo "publishing $name@$version"
-            # A workspace self-reference is a pnpm-only spelling that npm would
-            # publish verbatim, so the manifest copy npm sends must not carry it.
-            # The original is restored right after the publish.
-            ( cd "$dir" && npm pkg delete "devDependencies.$name" >/dev/null 2>&1 || true )
+            # `workspace:^` is a pnpm-only spelling that npm would publish
+            # verbatim, leaving consumers an unresolvable range. Resolve it
+            # against the workspace versions first, then restore the committed
+            # manifest right after the publish.
+            node scripts/prepare-publish.mjs "$dir"
             ( cd "$dir" && npm publish --ignore-scripts --provenance --access public )
             git checkout -- "$dir/package.json"
           done

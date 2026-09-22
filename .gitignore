@@ -6,3 +6,6 @@ coverage/
 *.log
 .pnpm-store/
 *.tgz
+# Throwaway DSH_HOME used to smoke-test a packed artifact without touching a
+# real profile (see the README's install section).
+.dsh-verify/
