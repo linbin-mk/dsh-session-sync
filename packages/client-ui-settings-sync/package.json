@@ -1,7 +1,7 @@
 {
   "name": "@linbin-mk/dsh-client-ui-settings-sync",
   "description": "Session sync settings plugin for the dsh web GUI: the Sync section page with git remote, cadence, project mappings, and manual sync, talking to the host through the plugin's own same-origin HTTP API",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
