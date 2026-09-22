@@ -6,7 +6,7 @@ import { resolveSlotLabel } from '@deepseek-ai/dsh-client-ui-slots'
 import { apply, inject, refreshIfLoaded } from '@linbin-mk/dsh-client-ui-settings-sync/client'
 import { SyncSection } from '../src/client/SyncSection.tsx'
 import { SyncStatusFooter } from '../src/client/SyncStatusFooter.tsx'
-import { FakeLocale, FakeRemote, FakeSlots } from './helpers.ts'
+import { FakeConfigForms, FakeLocale, FakeRemote, FakeSlots } from './helpers.ts'
 
 async function bench() {
   const ctx = new Context()
@@ -16,7 +16,9 @@ async function bench() {
   ctx.provide('locale', locale as never)
   const remote = new FakeRemote()
   ctx.provide('remote', remote as never)
-  return { ctx, slots, locale, remote }
+  const configForms = new FakeConfigForms()
+  ctx.provide('configForms', configForms as never)
+  return { ctx, slots, locale, remote, configForms }
 }
 
 function declare(slots: FakeSlots): void {
@@ -26,7 +28,7 @@ function declare(slots: FakeSlots): void {
 
 describe('ui-settings-sync apply', () => {
   it('declares the services it uses', () => {
-    expect(inject).toEqual(['slots', 'locale', 'remote'])
+    expect(inject).toEqual(['slots', 'locale', 'remote', 'configForms'])
   })
 
   it('registers the sync nav entry for declarations before or after apply', async () => {
@@ -74,6 +76,23 @@ describe('ui-settings-sync apply', () => {
       remote.$dispatch('settings/document-updated', ['other-namespace'])
       ctx.emit('connection/reset')
     }).not.toThrow()
+  })
+
+  it('reads the session-sync section through the shared configuration form and adopts its publishes', async () => {
+    const { ctx, slots, configForms } = await bench()
+    declare(slots)
+    await ctx.plugin({ inject: [...inject], apply }).await()
+    expect(configForms.requested).toContain('session-sync')
+
+    const injected = slots.entries('settings.section')[0]!.inject!() as unknown as import('../src/client/SyncSection.tsx').SyncSectionInjected
+    configForms.form('session-sync').publish({
+      enabled: true, remote: 'git@example.com:team/repo.git', branch: 'main', intervalMinutes: 5, mappings: [],
+    })
+    // The accepted section reached the page without a route round-trip.
+    expect(injected.controller.store.getSnapshot().settings).toMatchObject({
+      enabled: true, remote: 'git@example.com:team/repo.git',
+    })
+    expect(injected.controller.store.getSnapshot().writable).toBe(true)
   })
 
   it('refreshes only a loaded page on invalidation', async () => {

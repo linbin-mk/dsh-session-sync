@@ -1,8 +1,9 @@
 /**
  * Switch-notice injection: the first user chat in a session whose log this
- * machine just extended from the sync repo gets one plugin-attributed notice
- * telling the model that the history came from another machine and that the
- * local working directory is authoritative from here on.
+ * machine just extended from the sync repo gets one notice attributed to this
+ * package's own message source, telling the model that the history came from
+ * another machine and that the local working directory is authoritative from
+ * here on.
  *
  * The notice follows the agent-instructions pattern: it is a durable
  * `user/message` folded right after the claimed batch in the pre-step
@@ -19,9 +20,17 @@
 
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { ContextFormed } from '@deepseek-ai/dsh-llm'
 import type { UserMessage } from '@deepseek-ai/dsh-session'
 
-/** Plugin attribution of the injected notice (source kind `plugin`). */
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    /** Durable cross-machine switch notice produced by this plugin. */
+    'session-sync': { kind: 'session-sync' } & ContextFormed
+  }
+}
+
+/** Source kind of the injected notice (this package's own `MessageSourceMap` entry). */
 export const SWITCH_NOTICE_PLUGIN = 'session-sync'
 
 /**
@@ -38,13 +47,12 @@ export const SWITCH_NOTICE_TEXT = '本会话的历史记录是从另一台电脑
 /** One-line transcript-row summary of the notice (well under the 120-char bound). */
 export const SWITCH_NOTICE_SUMMARY = '会话已切换到本机：路径以本机工作目录为准'
 
-/** Build the durable switch-notice message (plugin source, `notice` form). */
+/** Build the durable switch-notice message (this package's source kind, `notice` form). */
 export function createSwitchNoticeMessage(): UserMessage {
   return createUserMessage({
     content: [{ type: 'text', text: SWITCH_NOTICE_TEXT }],
     source: {
-      kind: 'plugin',
-      plugin: SWITCH_NOTICE_PLUGIN,
+      kind: 'session-sync',
       form: 'notice',
       summary: SWITCH_NOTICE_SUMMARY,
     },

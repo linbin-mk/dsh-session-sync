@@ -42,7 +42,7 @@ The harness RPC table (`apiproxy`) is a static, compiler-locked registry — a t
 | `/session-sync/settings` | POST | Merge a patch into the settings section (host validates) |
 | `/session-sync/logs` | GET | Recent cycle-log records (within the window, newest first, `?limit=` up to 500) |
 
-The browser half calls these routes with plain `fetch`. Write routes refuse cross-origin requests (the `Origin` header must name this server's own host) and malformed bodies; the settings service re-validates every merged section. The only data the UI still reads from the generic harness API is the workspace list (`workspace.list`) — a standard, unchanged surface.
+The browser half calls the status, manual-action, and log routes with plain `fetch`. Write routes refuse cross-origin requests (the `Origin` header must name this server's own host) and malformed bodies. The settings section rides the harness's shared configuration form (`ctx.configForms`, addressed by the profile entry id `session-sync`), so the harness owns revision fencing and pushed updates. The plugin's own settings routes keep two jobs: `GET` serves a page the Host keeps process-local (a non-loopback page, `mode: 'memory'`), which displays the resolved section read-only, and `POST` is the only write path that carries the Host's refusal reason (a cross-field validation message), which the page fetches when the shared form reports `false`. The only other data the UI reads from the generic harness API is the workspace list (`workspace.list`) — a standard, unchanged surface.
 
 ## Repository layout
 
@@ -56,7 +56,7 @@ The host package holds the sync engine (`engine.ts`, `format.ts`, `git.ts`, `set
 ## Requirements
 
 - Node.js `^22.19 || >=24`
-- DeepSeek Harness `0.1.5-rc.1` (all `@deepseek-ai/*` dependencies use published npm versions; no local harness links)
+- DeepSeek Harness `0.1.7-alpha.1` (all `@deepseek-ai/*` dependencies use published npm versions; no local harness links)
 - `git` on PATH and an SSH key for the sync remote (host key checking: `StrictHostKeyChecking=accept-new`)
 - pnpm, but only when building from source
 
@@ -112,10 +112,11 @@ The install adds the two rows above automatically. The host plugin requires the 
 
 ## Configuration
 
-The `session-sync` settings namespace:
+Configuration is the Cordis Config of the `session-sync` profile row: every user-editable field is a live reference (`.volatile()`), and the harness commits each settings write into those references and persists it into the profile patch document (a legacy `session-sync` section in `settings.yaml` is imported automatically by the harness). The fields:
 
 | Field | Meaning |
 |---|---|
+| `startupSyncDelayMs` | Delay between startup and the first automatic cycle, in milliseconds (default 3000). A deployment choice: it has no settings-page row, and only user-editable fields are live references. |
 | `enabled` | Master switch; `remote` is required while enabled. |
 | `remote` | Git remote URL (SSH). Credentials come from `~/.ssh`. |
 | `branch` | Branch to synchronize; default `main`. |
@@ -136,7 +137,7 @@ Timing: one automatic cycle `startupSyncDelayMs` after startup, then every `inte
 
 ```sh
 pnpm install
-pnpm test        # 184 tests: engine, format, git, log, settings, service, routes, composition, UI
+pnpm test        # 202 tests: engine, format, git, log, settings, service, routes, composition, config writes, UI
 pnpm typecheck
 pnpm build       # tsc for both packages + the browser bundle (lib/client.js)
 ```

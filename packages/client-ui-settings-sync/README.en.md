@@ -7,7 +7,7 @@ English | [简体中文](https://github.com/linbin-mk/dsh-session-sync/blob/main
 
 The browser half of the dsh-session-sync plugin: the Sync settings page (`settings.section` id `sync`) and the sidebar status dot (`sidebar.footer.action` id `session-sync-status`) for the DeepSeek Harness web GUI.
 
-All plugin data arrives through the host's own same-origin HTTP API (`/session-sync/*`, plain `fetch`) — the browser package never touches the harness RPC table. Workspace choices come from the standard `useWorkspaces` hook.
+The settings section rides the harness's shared configuration form (`ctx.configForms.get('session-sync')`: reads plus a subscription for pushed updates, writes as revision-fenced `mutate`), so it never touches the harness RPC table; status, manual sync/cleanup, and the cycle log travel through the host's own same-origin HTTP API (`/session-sync/*`, plain `fetch`). A page the Host keeps process-local (non-loopback, `mode: 'memory'`) displays the section read-only and disables every write control; because the shared form flattens a Host refusal into `false`, the page then asks the plugin's `POST /session-sync/settings` for the refusal message. Workspace choices come from the standard `useWorkspaces` hook.
 
 The host half is [`@linbin-mk/dsh-session-sync`](https://www.npmjs.com/package/@linbin-mk/dsh-session-sync).
 

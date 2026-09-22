@@ -1,14 +1,18 @@
 /**
  * Session-sync settings plugin, browser half. It registers the Sync page
- * under the settings shell's section ledger; all plugin data arrives through
- * the plugin's own same-origin HTTP API (registered Host-side on the open
- * `webServer` seam), and workspace choices come from the useWorkspaces
- * standard hook, so this package owns no host state of its own and needs no
- * harness core changes.
+ * under the settings shell's section ledger; the settings section itself
+ * comes from the shared configuration form of the `session-sync` Host entry
+ * (reads and revision-fenced writes), while status, manual actions, and the
+ * cycle log arrive through the plugin's own same-origin HTTP API (registered
+ * Host-side on the open `webServer` seam). Workspace choices come from the
+ * useWorkspaces standard hook, so this package owns no host state of its own
+ * and needs no harness core changes.
  */
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
-// Type-only: pulls the settings shell's SlotMap merge (the 'settings.section' entry).
+// Type-only: the settings shell's configForms service plus its SlotMap merge
+// (the 'settings.section' entry). Cross-plugin collaboration goes through the
+// service, never a value import (client bundle purity gate).
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 // Type-only: pulls the sidebar foot's SlotMap merge (the 'sidebar.footer.action' entry).
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
@@ -25,7 +29,7 @@ import type { SyncSectionInjected } from './SyncSection.tsx'
 import { SyncStatusFooter } from './SyncStatusFooter.tsx'
 import type { SyncStatusFooterInjected } from './SyncStatusFooter.tsx'
 import { SyncSectionController, SESSION_SYNC_SETTINGS_NAMESPACE } from './controller.ts'
-import type { SyncSectionState } from './controller.ts'
+import type { SyncSectionState, SyncSettingsDraft } from './controller.ts'
 import { FetchSyncApi } from './api.ts'
 import { en, zh, type SyncKey } from './locales.ts'
 
@@ -47,8 +51,9 @@ const NS = 'settings.sync'
  * Required services (cordis fiber inject). The target slot is declared by
  * ui-settings' apply, whose activation order relative to this one is NOT
  * constrained; registration depends on that slot through `slots.inject()`.
+ * `configForms` owns the `session-sync` entry's section reads and writes.
  */
-export const inject = ['slots', 'locale', 'remote']
+export const inject = ['slots', 'locale', 'remote', 'configForms']
 
 /**
  * Refetch the page snapshot only after its first load: an unopened Sync page
@@ -68,7 +73,10 @@ export function refreshIfLoaded(controller: SyncSectionController): void {
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-settings-sync: copy dictionaries')
 
-  const controller = new SyncSectionController(new FetchSyncApi())
+  // The shared form of this plugin's own Host entry: the section reads, the
+  // accepted values, and the revision-fenced write queue live there.
+  const form = ctx.configForms.get<SyncSettingsDraft>(SESSION_SYNC_SETTINGS_NAMESPACE)
+  const controller = new SyncSectionController(new FetchSyncApi(), form)
   // One stable bare source declared in the reserved inject `hooks`
   // compartment; the renderer binds it into the `useSnapshot` selector hook
   // the components receive (the platform retired the web-react package and
@@ -93,6 +101,9 @@ export function apply(ctx: ClientContext): void {
 
   ctx.effect(() => {
     const disposers = [
+      // The form publishes every accepted section (this page's own writes and
+      // any other editor's); the page adopts it without another round-trip.
+      form.subscribe(() => { controller.adoptSettings() }),
       ctx.remote.$on('settings/document-updated', (ns: string) => {
         if (ns === SESSION_SYNC_SETTINGS_NAMESPACE) refreshIfLoaded(controller)
       }),

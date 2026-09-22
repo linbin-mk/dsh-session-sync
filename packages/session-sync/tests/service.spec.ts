@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { Context } from '@deepseek-ai/cordis'
+import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { execFile } from 'node:child_process'
@@ -8,13 +8,20 @@ import { readFileSync } from 'node:fs'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { SettingsProvider } from '@deepseek-ai/dsh-settings'
-import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import { SESSION_FORMAT_VERSION, SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader, UserMessage } from '@deepseek-ai/dsh-session'
-import SessionSyncService from '../src/index.ts'
+import type SessionSyncService from '../src/index.ts'
 import type { SessionSyncCompleted } from '../src/index.ts'
 import { parsePortableSession } from '../src/format.ts'
+import { composeSessionSync } from './compose.ts'
+import { fakePersistence } from './persistence-double.ts'
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    /** A foreign plugin's notice; declared here to prove unknown kinds fall through. */
+    'other-plugin': { kind: 'other-plugin'; form: 'notice'; summary: string }
+  }
+}
 
 const execFileAsync = promisify(execFile)
 
@@ -45,89 +52,6 @@ function sessionArtifact(id = 'session-a', project = 'demo'): string {
   ].join('\n')
 }
 
-/** A settings provider storing its document in memory (the seam's test double shape). */
-class MemorySettingsProvider extends SettingsProvider {
-  override readonly writable = true
-  private ownDocument: Record<string, unknown>
-
-  constructor(ctx: Context, document: Record<string, unknown> = {}) {
-    super(ctx)
-    this.ownDocument = document
-  }
-
-  protected override load(): Promise<Record<string, unknown>> {
-    return Promise.resolve(this.ownDocument)
-  }
-
-  protected override persist(ns: SettingsNamespace, section: Record<string, unknown>): Promise<void> {
-    this.ownDocument = { ...this.ownDocument, [String(ns)]: section }
-    return Promise.resolve()
-  }
-}
-
-/** A persistence double: no sessions stored, all read/write paths recorded. */
-function fakePersistence(options: {
-  headers?: SessionHeader[]
-  rawFor?: Map<string, string>
-  readFromThrows?: boolean
-} = {}) {
-  const created: SessionHeader[] = []
-  const appended: { id: string; count: number }[] = []
-  const sessions = new Map<string, { meta: SessionHeader; inheritedEventCount: ReturnType<typeof SessionLogOffset>; events: SessionEvent[] }>()
-  for (const header of options.headers ?? []) {
-    const raw = options.rawFor?.get(String(header.id))
-    const parsed = raw === undefined ? undefined : parsePortableSession(raw, header.cwd ?? '/tmp')
-    sessions.set(String(header.id), {
-      meta: header,
-      inheritedEventCount: parsed?.inheritedEventCount ?? SessionLogOffset(0),
-      events: parsed?.events ?? [],
-    })
-  }
-  function handleFor(id: { toString(): string }, access: 'read' | 'write') {
-    const stored = sessions.get(String(id))
-    if (stored === undefined) throw new Error('session not found')
-    return {
-      id: stored.meta.id,
-      header: stored.meta,
-      inheritedEventCount: stored.inheritedEventCount,
-      access,
-      async read(): Promise<{ eventState: 'shared-frozen'; events: readonly SessionEvent[] }> {
-        if (options.readFromThrows === true) throw new Error('readFrom rejected')
-        return { eventState: 'shared-frozen', events: [...stored.events] }
-      },
-      async append(events: readonly SessionEvent[]): Promise<void> {
-        appended.push({ id: String(id), count: events.length })
-        stored.events.push(...events)
-      },
-      async flush(): Promise<void> {},
-      async close(): Promise<void> {},
-    }
-  }
-  return {
-    async stat(id: { toString(): string }): Promise<object | undefined> {
-      const stored = sessions.get(String(id))
-      return stored === undefined ? undefined : { header: stored.meta, revision: 'test' }
-    },
-    async open(id: { toString(): string }, access: 'read' | 'write') {
-      return handleFor(id, access)
-    },
-    async create(meta: SessionHeader, createOptions?: { inheritedEventCount?: ReturnType<typeof SessionLogOffset> }) {
-      created.push(meta)
-      sessions.set(String(meta.id), {
-        meta,
-        inheritedEventCount: createOptions?.inheritedEventCount ?? SessionLogOffset(0),
-        events: [],
-      })
-      return handleFor(meta.id, 'write')
-    },
-    async list(): Promise<{ header: SessionHeader; revision: string }[]> {
-      return [...sessions.values()].map(stored => ({ header: stored.meta, revision: 'test' }))
-    },
-    created,
-    appended,
-  }
-}
-
 /** Poll until a predicate turns true or the timeout expires. */
 async function waitFor(predicate: () => boolean, what: string, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
@@ -140,7 +64,7 @@ async function waitFor(predicate: () => boolean, what: string, timeoutMs = 5_000
 
 async function compose(
   options: {
-    document?: Record<string, unknown>
+    settings?: Record<string, unknown>
     delayMs?: number
     headers?: SessionHeader[]
     rawFor?: Map<string, string>
@@ -150,25 +74,39 @@ async function compose(
       coldSnapshot(meta: unknown, inheritedEventCount: unknown, events: unknown): unknown
     }
   } = {},
-): Promise<{ ctx: Context; persistence: ReturnType<typeof fakePersistence>; service: SessionSyncService }> {
+): Promise<{
+  ctx: Context
+  persistence: ReturnType<typeof fakePersistence>
+  service: SessionSyncService
+  write: (patch: object) => Promise<void>
+  loaderUpdate: (patch: Record<string, unknown>) => Promise<void>
+  patchDocument: () => string
+}> {
   const root = options.dshHome ?? await mkdtemp(join(tmpdir(), 'dsh-sync-service-'))
   if (options.dshHome === undefined) roots.push(root)
   process.env.DSH_HOME = root
 
-  const ctx = new Context()
-  contexts.push(ctx)
-  await ctx.plugin(MemorySettingsProvider, options.document ?? {})
   const persistence = fakePersistence({
     ...options.headers === undefined ? {} : { headers: options.headers },
     ...options.rawFor === undefined ? {} : { rawFor: options.rawFor },
     ...options.readFromThrows === undefined ? {} : { readFromThrows: options.readFromThrows },
   })
-  ctx.provide('sessionPersistence', persistence as never)
-  if (options.projectionCache !== undefined) {
-    ctx.provide('sessionProjectionCache', options.projectionCache as never)
+  const composed = await composeSessionSync({
+    home: root,
+    startupSyncDelayMs: options.delayMs ?? 20,
+    ...options.settings === undefined ? {} : { config: options.settings },
+    persistence,
+    ...options.projectionCache === undefined ? {} : { projectionCache: options.projectionCache },
+  })
+  contexts.push(composed.ctx)
+  return {
+    ctx: composed.ctx,
+    persistence,
+    service: composed.service,
+    write: composed.write,
+    loaderUpdate: composed.loaderUpdate,
+    patchDocument: composed.patchDocument,
   }
-  await ctx.plugin(SessionSyncService, { startupSyncDelayMs: options.delayMs ?? 20 })
-  return { ctx, persistence, service: ctx.sessionSync }
 }
 
 afterEach(async () => {
@@ -230,14 +168,12 @@ describe('SessionSyncService', () => {
 
     const completed: SessionSyncCompleted[] = []
     const { ctx, service } = await compose({
-      document: {
-        'session-sync': {
-          enabled: true,
-          remote: bare,
-          branch: 'main',
-          intervalMinutes: 5,
-          mappings: [{ key: 'demo', path: project }],
-        },
+      settings: {
+        enabled: true,
+        remote: bare,
+        branch: 'main',
+        intervalMinutes: 5,
+        mappings: [{ key: 'demo', path: project }],
       },
     })
     ctx.on('session-sync/completed', (payload) => { completed.push(payload) })
@@ -282,14 +218,12 @@ describe('SessionSyncService', () => {
 
       const completed: SessionSyncCompleted[] = []
       const { ctx, service } = await compose({
-        document: {
-          'session-sync': {
-            enabled: true,
-            remote: bare,
-            branch: 'main',
-            intervalMinutes: 1,
-            mappings: [{ key: 'demo', path: project }],
-          },
+        settings: {
+          enabled: true,
+          remote: bare,
+          branch: 'main',
+          intervalMinutes: 1,
+          mappings: [{ key: 'demo', path: project }],
         },
         delayMs: 20,
       })
@@ -320,14 +254,12 @@ describe('SessionSyncService', () => {
     await mkdir(project, { recursive: true })
 
     const { service } = await compose({
-      document: {
-        'session-sync': {
-          enabled: true,
-          remote: bare,
-          branch: 'main',
-          intervalMinutes: 5,
-          mappings: [{ key: 'demo', path: project }],
-        },
+      settings: {
+        enabled: true,
+        remote: bare,
+        branch: 'main',
+        intervalMinutes: 5,
+        mappings: [{ key: 'demo', path: project }],
       },
       delayMs: 20,
       headers: [sessionHeader('session-a', project)],
@@ -347,14 +279,12 @@ describe('SessionSyncService', () => {
 
     const artifact = sessionArtifact()
     const { service } = await compose({
-      document: {
-        'session-sync': {
-          enabled: true,
-          remote: bare,
-          branch: 'main',
-          intervalMinutes: 5,
-          mappings: [{ key: 'demo', path: project }],
-        },
+      settings: {
+        enabled: true,
+        remote: bare,
+        branch: 'main',
+        intervalMinutes: 5,
+        mappings: [{ key: 'demo', path: project }],
       },
       delayMs: 20,
       dshHome: root,
@@ -383,14 +313,12 @@ describe('SessionSyncService', () => {
     await mkdir(project, { recursive: true })
 
     const { service } = await compose({
-      document: {
-        'session-sync': {
-          enabled: true,
-          remote: bare,
-          branch: 'main',
-          intervalMinutes: 5,
-          mappings: [{ key: 'demo', path: project }],
-        },
+      settings: {
+        enabled: true,
+        remote: bare,
+        branch: 'main',
+        intervalMinutes: 5,
+        mappings: [{ key: 'demo', path: project }],
       },
       delayMs: 200,
       dshHome: root,
@@ -415,14 +343,12 @@ describe('SessionSyncService', () => {
 
     const coldSnapshot = vi.fn((_meta: unknown, _inheritedEventCount: unknown, _events: unknown) => undefined)
     const { service } = await compose({
-      document: {
-        'session-sync': {
-          enabled: true,
-          remote: bare,
-          branch: 'main',
-          intervalMinutes: 5,
-          mappings: [{ key: 'demo', path: project }],
-        },
+      settings: {
+        enabled: true,
+        remote: bare,
+        branch: 'main',
+        intervalMinutes: 5,
+        mappings: [{ key: 'demo', path: project }],
       },
       delayMs: 20,
       dshHome: root,
@@ -445,14 +371,12 @@ describe('SessionSyncService', () => {
   it('records a cycle failure on the status view and keeps serving status', async () => {
     previousDshHome = process.env.DSH_HOME
     const { service } = await compose({
-      document: {
-        'session-sync': {
-          enabled: true,
-          remote: '/nonexistent/remote.git',
-          branch: 'main',
-          intervalMinutes: 5,
-          mappings: [],
-        },
+      settings: {
+        enabled: true,
+        remote: '/nonexistent/remote.git',
+        branch: 'main',
+        intervalMinutes: 5,
+        mappings: [],
       },
     })
 
@@ -481,14 +405,12 @@ describe('SessionSyncService', () => {
     await mkdir(project, { recursive: true })
 
     const { ctx, service } = await compose({
-      document: {
-        'session-sync': {
-          enabled: true,
-          remote: bare,
-          branch: 'main',
-          intervalMinutes: 5,
-          mappings: [{ key: 'demo', path: project }],
-        },
+      settings: {
+        enabled: true,
+        remote: bare,
+        branch: 'main',
+        intervalMinutes: 5,
+        mappings: [{ key: 'demo', path: project }],
       },
       delayMs: 20,
       dshHome: root,
@@ -531,7 +453,7 @@ describe('SessionSyncService', () => {
     expect(first.kind).toBe('enter')
     if (first.kind !== 'enter') return
     expect(first.messages).toHaveLength(2)
-    expect(first.messages[1].source).toMatchObject({ kind: 'plugin', plugin: 'session-sync', form: 'notice' })
+    expect(first.messages[1].source).toMatchObject({ kind: 'session-sync', form: 'notice' })
 
     // Later chats on the same machine: no second notice.
     const second = await driver('session-a', userTurn())
@@ -558,14 +480,12 @@ describe('SessionSyncService', () => {
     await mkdir(project, { recursive: true })
 
     const first = await compose({
-      document: {
-        'session-sync': {
-          enabled: true,
-          remote: bare,
-          branch: 'main',
-          intervalMinutes: 5,
-          mappings: [{ key: 'demo', path: project }],
-        },
+      settings: {
+        enabled: true,
+        remote: bare,
+        branch: 'main',
+        intervalMinutes: 5,
+        mappings: [{ key: 'demo', path: project }],
       },
       delayMs: 20,
       dshHome: root,
@@ -583,7 +503,7 @@ describe('SessionSyncService', () => {
 
     const wakeClaim = createUserMessage({
       content: [{ type: 'text', text: 'tool wake' }],
-      source: { kind: 'plugin', plugin: 'other', form: 'notice', summary: 'wake' },
+      source: { kind: 'other-plugin', form: 'notice', summary: 'wake' },
     })
     // A plugin-only wake neither injects nor consumes the mark.
     const wake = await first.ctx.waterfall(
@@ -604,14 +524,12 @@ describe('SessionSyncService', () => {
     // Restart the service over the same home (long startup delay: no cycle).
     await first.ctx.fiber.dispose()
     const second = await compose({
-      document: {
-        'session-sync': {
-          enabled: true,
-          remote: bare,
-          branch: 'main',
-          intervalMinutes: 5,
-          mappings: [{ key: 'demo', path: project }],
-        },
+      settings: {
+        enabled: true,
+        remote: bare,
+        branch: 'main',
+        intervalMinutes: 5,
+        mappings: [{ key: 'demo', path: project }],
       },
       delayMs: 60_000,
       dshHome: root,
@@ -635,7 +553,7 @@ describe('SessionSyncService', () => {
     expect(decision.kind).toBe('enter')
     if (decision.kind !== 'enter') return
     expect(decision.messages).toHaveLength(2)
-    expect(decision.messages[1].source).toMatchObject({ kind: 'plugin', plugin: 'session-sync', form: 'notice' })
+    expect(decision.messages[1].source).toMatchObject({ kind: 'session-sync', form: 'notice' })
   })
 
   it('cleans git space on demand, truncating the remote history to the configured budget', async () => {
@@ -646,15 +564,13 @@ describe('SessionSyncService', () => {
     await execFileAsync('git', ['init', '--bare', '-b', 'main', bare])
 
     const { service } = await compose({
-      document: {
-        'session-sync': {
-          enabled: true,
-          remote: bare,
-          branch: 'main',
-          intervalMinutes: 5,
-          mappings: [],
-          cleanup: { enabled: false, periodHours: 24, keepCommits: 1 },
-        },
+      settings: {
+        enabled: true,
+        remote: bare,
+        branch: 'main',
+        intervalMinutes: 5,
+        mappings: [],
+        cleanup: { enabled: false, periodHours: 24, keepCommits: 1 },
       },
       // No startup cycle: the worktree below is prepared by hand.
       delayMs: 60_000,
@@ -714,15 +630,13 @@ describe('SessionSyncService', () => {
       await execFileAsync('git', ['init', '--bare', '-b', 'main', bare])
 
       const { service } = await compose({
-        document: {
-          'session-sync': {
-            enabled: true,
-            remote: bare,
-            branch: 'main',
-            intervalMinutes: 1,
-            mappings: [],
-            cleanup: { enabled: true, periodHours: 1, keepCommits: 200 },
-          },
+        settings: {
+          enabled: true,
+          remote: bare,
+          branch: 'main',
+          intervalMinutes: 1,
+          mappings: [],
+          cleanup: { enabled: true, periodHours: 1, keepCommits: 200 },
         },
         delayMs: 20,
         dshHome: root,

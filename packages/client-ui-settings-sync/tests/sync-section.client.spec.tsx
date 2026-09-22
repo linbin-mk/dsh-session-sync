@@ -2,11 +2,12 @@
 /** Sync section presentation: field commits, mapping edits, sync action gating, and status rendering. */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { bindSnapshotSelector } from './helpers.ts'
+import { bindSnapshotSelector, FakeConfigForm, writtenPatch } from './helpers.ts'
 import { makeTranslate } from './helpers.ts'
 import { SyncSection } from '../src/client/SyncSection.tsx'
 import type { SyncSectionInjected, SyncSectionProps } from '../src/client/SyncSection.tsx'
 import { SyncSectionController } from '../src/client/controller.ts'
+import type { SyncSettingsDraft } from '../src/client/controller.ts'
 import type { SyncApi } from '../src/client/api.ts'
 
 import { zh } from '../src/client/locales.ts'
@@ -41,26 +42,23 @@ interface FakeApi {
 }
 
 function fakeApi(options: {
-  settingsValue?: object
+  settingsValue?: Record<string, unknown>
   statusValue?: object
   writable?: boolean
-  updateError?: string
   logsValue?: unknown[]
 } = {}): FakeApi {
-  const document = options.settingsValue ?? {
-    enabled: false,
-    remote: '',
-    branch: 'main',
-    intervalMinutes: 5,
-    mappings: [],
-  }
   return {
-    getSettings: vi.fn(() => Promise.resolve({ writable: options.writable ?? true, settings: document })),
-    updateSettings: vi.fn((patch: object) => {
-      if (options.updateError !== undefined) return Promise.reject(new Error(options.updateError))
-      Object.assign(document, patch)
-      return Promise.resolve()
-    }),
+    getSettings: vi.fn(() => Promise.resolve({
+      writable: options.writable ?? true,
+      settings: options.settingsValue ?? {
+        enabled: false,
+        remote: '',
+        branch: 'main',
+        intervalMinutes: 5,
+        mappings: [],
+      },
+    })),
+    updateSettings: vi.fn(() => Promise.resolve()),
     status: vi.fn(() => Promise.resolve(options.statusValue ?? baseStatus)),
     syncNow: vi.fn(() => Promise.resolve(baseStatus)),
     cleanupNow: vi.fn(() => Promise.resolve(baseStatus)),
@@ -79,11 +77,12 @@ const workspaceList = (items: { workspaceId: string; path: string; title: string
 
 async function mount(options: {
   api?: FakeApi
-  settingsValue?: object
+  settingsValue?: Record<string, unknown>
   statusValue?: object
   writable?: boolean
   workspaces?: { workspaceId: string; path: string; title: string }[]
   logsValue?: unknown[]
+  form?: FakeConfigForm<SyncSettingsDraft>
 } = {}) {
   const api = options.api ?? fakeApi({
     ...options.settingsValue === undefined ? {} : { settingsValue: options.settingsValue },
@@ -91,7 +90,14 @@ async function mount(options: {
     ...options.writable === undefined ? {} : { writable: options.writable },
     ...options.logsValue === undefined ? {} : { logsValue: options.logsValue },
   })
-  const controller = new SyncSectionController(api as SyncApi)
+  // The shared form of the `session-sync` entry serves the section by
+  // default; a spec that wants the plugin's own route read passes no form.
+  const form = options.form ?? new FakeConfigForm<SyncSettingsDraft>({
+    value: options.settingsValue ?? {
+      enabled: false, remote: '', branch: 'main', intervalMinutes: 5, mappings: [],
+    },
+  })
+  const controller = new SyncSectionController(api as SyncApi, form)
   const injected: SyncSectionInjected = {
     controller,
     t,
@@ -108,7 +114,7 @@ async function mount(options: {
   }
   const view = render(<SyncSection {...props} />)
   await waitFor(() => { expect(controller.store.getSnapshot().status).toBe('ready') })
-  return { view, api, controller }
+  return { view, api, form, controller }
 }
 
 describe('SyncSection', () => {
@@ -120,7 +126,7 @@ describe('SyncSection', () => {
   it('shows the intro while loading and the failure line when the load fails', async () => {
     const api = fakeApi()
     api.status = vi.fn(() => Promise.reject(new Error('status down')))
-    const controller = new SyncSectionController(api as SyncApi)
+    const controller = new SyncSectionController(api as SyncApi, new FakeConfigForm())
     const view = render(<SyncSection
       controller={controller}
       useSnapshot={bindSnapshotSelector(controller.store)}
@@ -132,51 +138,51 @@ describe('SyncSection', () => {
     view.unmount()
   })
 
-  it('commits the master switch and text fields through the wire', async () => {
-    const { api } = await mount()
+  it('commits the master switch and text fields through the shared form', async () => {
+    const { form } = await mount()
     fireEvent.click(screen.getByRole('checkbox', { name: t('enabled') }))
     await waitFor(() => {
-      expect(api.updateSettings).toHaveBeenCalledWith({ enabled: true })
+      expect(writtenPatch(form)).toEqual({ enabled: true })
     })
 
     const remote = screen.getByLabelText(t('remote'))
     fireEvent.change(remote, { target: { value: 'git@example.com:team/repo.git' } })
     fireEvent.focusOut(remote)
     await waitFor(() => {
-      expect(api.updateSettings).toHaveBeenCalledWith({ remote: 'git@example.com:team/repo.git' })
+      expect(writtenPatch(form)).toEqual({ remote: 'git@example.com:team/repo.git' })
     })
 
     const branch = screen.getByLabelText(t('branch'))
     fireEvent.change(branch, { target: { value: 'develop' } })
     fireEvent.focusOut(branch)
     await waitFor(() => {
-      expect(api.updateSettings).toHaveBeenCalledWith({ branch: 'develop' })
+      expect(writtenPatch(form)).toEqual({ branch: 'develop' })
     })
 
     const interval = screen.getByLabelText(t('interval'))
     fireEvent.change(interval, { target: { value: '10' } })
     await waitFor(() => {
-      expect(api.updateSettings).toHaveBeenCalledWith({ intervalMinutes: 10 })
+      expect(writtenPatch(form)).toEqual({ intervalMinutes: 10 })
     })
   })
 
   it('skips unchanged blur commits', async () => {
-    const { api } = await mount({
+    const { form } = await mount({
       settingsValue: {
         enabled: false, remote: 'git@example.com:team/repo.git', branch: 'main', intervalMinutes: 5, mappings: [],
       },
     })
-    const before = api.updateSettings.mock.calls.length
+    const before = form.writes.length
     const remote = screen.getByLabelText(t('remote'))
     fireEvent.focusOut(remote)
     const branch = screen.getByLabelText(t('branch'))
     fireEvent.focusOut(branch)
     await new Promise(resolve => setTimeout(resolve, 0))
-    expect(api.updateSettings.mock.calls.length).toBe(before)
+    expect(form.writes.length).toBe(before)
   })
 
   it('adds, edits, and removes mapping rows with title-defaulted keys', async () => {
-    const { api } = await mount({
+    const mounted = await mount({
       workspaces: [
         { workspaceId: 'w1', path: '/work/demo', title: 'demo' },
         { workspaceId: 'w2', path: '/work/server', title: 'server' },
@@ -184,19 +190,21 @@ describe('SyncSection', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: t('addMapping') }))
     await waitFor(() => {
-      expect(api.updateSettings).toHaveBeenCalledWith({
+      expect(writtenPatch(mounted.form)).toEqual({
         mappings: [{ key: 'demo', path: '/work/demo' }],
       })
     })
     // The post-write reload lands before the edit, so the draft it publishes
     // cannot clobber the typed key.
-    await waitFor(() => { expect(api.getSettings.mock.calls.length).toBeGreaterThanOrEqual(2) })
+    await waitFor(() => {
+      expect(mounted.controller.store.getSnapshot().settings?.mappings).toEqual([{ key: 'demo', path: '/work/demo' }])
+    })
 
     const key = screen.getByLabelText(t('mappingKey'))
     fireEvent.change(key, { target: { value: 'server' } })
     fireEvent.focusOut(key)
     await waitFor(() => {
-      expect(api.updateSettings).toHaveBeenCalledWith({
+      expect(writtenPatch(mounted.form)).toEqual({
         mappings: [{ key: 'server', path: '/work/demo' }],
       })
     })
@@ -204,7 +212,7 @@ describe('SyncSection', () => {
     const path = screen.getByLabelText(t('mappingPath'))
     fireEvent.change(path, { target: { value: '/work/demo' } })
     await waitFor(() => {
-      expect(api.updateSettings).toHaveBeenCalledWith({
+      expect(writtenPatch(mounted.form)).toEqual({
         mappings: [{ key: 'server', path: '/work/demo' }],
       })
     })
@@ -212,12 +220,15 @@ describe('SyncSection', () => {
     // A second row defaults to the workspace title again (no duplicate) and
     // exercises the untouched-entry arm of the mapping rewrite.
     fireEvent.click(screen.getByRole('button', { name: t('addMapping') }))
-    await waitFor(() => { expect(api.getSettings.mock.calls.length).toBeGreaterThanOrEqual(3) })
+    await waitFor(() => {
+      expect(mounted.controller.store.getSnapshot().settings?.mappings)
+        .toEqual([{ key: 'server', path: '/work/demo' }, { key: 'demo', path: '/work/demo' }])
+    })
     const firstKey = screen.getAllByLabelText(t('mappingKey'))[0]!
     fireEvent.change(firstKey, { target: { value: 'prod' } })
     fireEvent.focusOut(firstKey)
     await waitFor(() => {
-      expect(api.updateSettings).toHaveBeenCalledWith({
+      expect(writtenPatch(mounted.form)).toEqual({
         mappings: [{ key: 'prod', path: '/work/demo' }, { key: 'demo', path: '/work/demo' }],
       })
     })
@@ -226,14 +237,14 @@ describe('SyncSection', () => {
     const firstPath = screen.getAllByLabelText(t('mappingPath'))[0]!
     fireEvent.change(firstPath, { target: { value: '/work/server' } })
     await waitFor(() => {
-      expect(api.updateSettings).toHaveBeenCalledWith({
+      expect(writtenPatch(mounted.form)).toEqual({
         mappings: [{ key: 'prod', path: '/work/server' }, { key: 'demo', path: '/work/demo' }],
       })
     })
 
     fireEvent.click(screen.getAllByRole('button', { name: new RegExp(t('removeMapping', { key: 'prod' }).slice(0, 3)) })[0]!)
     await waitFor(() => {
-      expect(api.updateSettings).toHaveBeenCalledWith({
+      expect(writtenPatch(mounted.form)).toEqual({
         mappings: [{ key: 'demo', path: '/work/demo' }],
       })
     })
@@ -259,7 +270,7 @@ describe('SyncSection', () => {
   })
 
   it('de-duplicates the title-defaulted key with a numeric suffix', async () => {
-    const { api } = await mount({
+    const { form } = await mount({
       settingsValue: { enabled: true, remote: 'git@example.com:team/repo.git', branch: 'main', intervalMinutes: 5, mappings: [{ key: 'demo', path: '/work/demo' }] },
       workspaces: [
         { workspaceId: 'w1', path: '/work/demo', title: 'demo' },
@@ -268,14 +279,14 @@ describe('SyncSection', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: t('addMapping') }))
     await waitFor(() => {
-      expect(api.updateSettings).toHaveBeenCalledWith({
+      expect(writtenPatch(form)).toEqual({
         mappings: [{ key: 'demo', path: '/work/demo' }, { key: 'demo-2', path: '/work/demo' }],
       })
     })
   })
 
   it('skips occupied numeric suffixes when de-duplicating the default key', async () => {
-    const { api } = await mount({
+    const { form } = await mount({
       settingsValue: { enabled: true, remote: 'git@example.com:team/repo.git', branch: 'main', intervalMinutes: 5, mappings: [{ key: 'demo', path: '/work/demo' }, { key: 'demo-2', path: '/work/server' }] },
       workspaces: [
         { workspaceId: 'w1', path: '/work/demo', title: 'demo' },
@@ -284,7 +295,7 @@ describe('SyncSection', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: t('addMapping') }))
     await waitFor(() => {
-      expect(api.updateSettings).toHaveBeenCalledWith({
+      expect(writtenPatch(form)).toEqual({
         mappings: [{ key: 'demo', path: '/work/demo' }, { key: 'demo-2', path: '/work/server' }, { key: 'demo-3', path: '/work/demo' }],
       })
     })
@@ -298,12 +309,9 @@ describe('SyncSection', () => {
     expect(screen.getByRole('button', { name: t('syncNow') })).toHaveProperty('disabled', true)
     expect(screen.getByText(t('notConfigured'))).toBeTruthy()
 
-    api.getSettings = vi.fn(() => Promise.resolve({
-      writable: true,
-      settings: {
-        enabled: true, remote: 'git@example.com:team/repo.git', branch: 'main', intervalMinutes: 5, mappings: [],
-      },
-    }))
+    mounted.form.publish({
+      enabled: true, remote: 'git@example.com:team/repo.git', branch: 'main', intervalMinutes: 5, mappings: [],
+    })
     await act(async () => { await mounted.controller.load() })
     fireEvent.click(screen.getByRole('button', { name: t('syncNow') }))
     await waitFor(() => { expect(api.syncNow).toHaveBeenCalledWith() })
@@ -366,9 +374,12 @@ describe('SyncSection', () => {
     const api = fakeApi({
       settingsValue: { enabled: true, remote: 'git@example.com:team/repo.git', branch: 'main', intervalMinutes: 5, mappings: [] },
       writable: false,
-      updateError: 'remote is required when the plugin is enabled',
     })
-    const mounted = await mount({ api })
+    const form = new FakeConfigForm<SyncSettingsDraft>({
+      value: { enabled: true, remote: 'git@example.com:team/repo.git', branch: 'main', intervalMinutes: 5, mappings: [] },
+      writable: false,
+    })
+    const mounted = await mount({ api, form })
     expect(screen.getByText(t('readOnly'))).toBeTruthy()
 
     act(() => {
@@ -378,6 +389,7 @@ describe('SyncSection', () => {
     act(() => {
       mounted.controller.store.update((state) => { state.writable = true })
     })
+    form.writeError = 'remote is required when the plugin is enabled'
     fireEvent.click(screen.getByRole('checkbox', { name: t('enabled') }))
     await waitFor(() => {
       expect(screen.getByText(t('writeFailed', { message: 'remote is required when the plugin is enabled' }))).toBeTruthy()
@@ -399,32 +411,39 @@ describe('SyncSection', () => {
     expect(screen.getByText(t('unmapped'))).toBeTruthy()
   })
 
-  it('commits the cleanup switch, period, and kept-commit count through the wire', async () => {
-    const { api } = await mount()
+  it('commits the cleanup switch, period, and kept-commit count through the shared form', async () => {
+    const mounted = await mount()
+    const form = mounted.form
     fireEvent.click(screen.getByRole('checkbox', { name: t('cleanupEnabled') }))
     await waitFor(() => {
-      expect(api.updateSettings).toHaveBeenCalledWith({ cleanup: { enabled: true, periodHours: 24, keepCommits: 200 } })
+      expect(writtenPatch(form)).toEqual({ cleanup: { enabled: true, periodHours: 24, keepCommits: 200 } })
     })
     // The post-write reload lands before the next edit publishes the draft.
-    await waitFor(() => { expect(api.getSettings.mock.calls.length).toBeGreaterThanOrEqual(2) })
+    await waitFor(() => {
+      expect(mounted.controller.store.getSnapshot().settings?.cleanup)
+        .toEqual({ enabled: true, periodHours: 24, keepCommits: 200 })
+    })
 
     const period = screen.getByLabelText(t('cleanupPeriod'))
     fireEvent.change(period, { target: { value: '72' } })
     await waitFor(() => {
-      expect(api.updateSettings).toHaveBeenCalledWith({ cleanup: { enabled: true, periodHours: 72, keepCommits: 200 } })
+      expect(writtenPatch(form)).toEqual({ cleanup: { enabled: true, periodHours: 72, keepCommits: 200 } })
     })
-    await waitFor(() => { expect(api.getSettings.mock.calls.length).toBeGreaterThanOrEqual(3) })
+    await waitFor(() => {
+      expect(mounted.controller.store.getSnapshot().settings?.cleanup)
+        .toEqual({ enabled: true, periodHours: 72, keepCommits: 200 })
+    })
 
     const keep = screen.getByLabelText(t('cleanupKeep'))
     fireEvent.change(keep, { target: { value: '50' } })
     fireEvent.focusOut(keep)
     await waitFor(() => {
-      expect(api.updateSettings).toHaveBeenCalledWith({ cleanup: { enabled: true, periodHours: 72, keepCommits: 50 } })
+      expect(writtenPatch(form)).toEqual({ cleanup: { enabled: true, periodHours: 72, keepCommits: 50 } })
     })
   })
 
   it('keeps the current cleanup values when the count input goes invalid', async () => {
-    const { api } = await mount({
+    const { form } = await mount({
       settingsValue: {
         enabled: false, remote: '', branch: 'main', intervalMinutes: 5, mappings: [],
         cleanup: { enabled: true, periodHours: 24, keepCommits: 200 },
@@ -436,7 +455,7 @@ describe('SyncSection', () => {
     fireEvent.change(keep, { target: { value: '-3' } })
     fireEvent.focusOut(keep)
     await new Promise(resolve => setTimeout(resolve, 0))
-    expect(api.updateSettings).not.toHaveBeenCalled()
+    expect(form.writes).toHaveLength(0)
     expect((keep as HTMLInputElement).value).toBe('200')
   })
 
@@ -447,12 +466,9 @@ describe('SyncSection', () => {
     const mounted = await mount({ api })
     expect(screen.getByRole('button', { name: t('cleanupNow') })).toHaveProperty('disabled', true)
 
-    api.getSettings = vi.fn(() => Promise.resolve({
-      writable: true,
-      settings: {
-        enabled: true, remote: 'git@example.com:team/repo.git', branch: 'main', intervalMinutes: 5, mappings: [],
-      },
-    }))
+    mounted.form.publish({
+      enabled: true, remote: 'git@example.com:team/repo.git', branch: 'main', intervalMinutes: 5, mappings: [],
+    })
     await act(async () => { await mounted.controller.load() })
     fireEvent.click(screen.getByRole('button', { name: t('cleanupNow') }))
     await waitFor(() => { expect(api.cleanupNow).toHaveBeenCalledWith() })

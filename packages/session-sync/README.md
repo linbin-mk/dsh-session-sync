@@ -9,9 +9,9 @@ dsh-session-sync 插件的 host 半边：DeepSeek Harness 的 git 后端自动�
 
 架构、组合与安装见[仓库 README](https://github.com/linbin-mk/dsh-session-sync#readme)。本包导出：
 
-- `SessionSyncService`（默认导出）：cordis 服务——设置命名空间、定时器、单飞周期与 `session-sync/completed` 事件。
-- 引擎（`compareLogs`、`runSyncCycle`）、仓库格式工具、`GitRepository`/`GitError`、设置契约（`SESSION_SYNC_NAMESPACE`、schema、校验）。
-- 切换提醒（`SWITCH_NOTICE_TEXT`、`createSwitchNoticeMessage`、`withSwitchNotice`）：为「切换电脑后首次续聊」注入一次插件 `notice` 消息。
+- `SessionSyncService`（默认导出）：cordis 服务——读 profile 行的活配置、定时器、单飞周期与 `session-sync/completed` 事件。
+- 引擎（`compareLogs`、`runSyncCycle`）、仓库格式工具、`GitRepository`/`GitError`、配置契约（`Config`/`ConfigInput`、`SESSION_SYNC_NAMESPACE`、`readSettings`、`validateSessionSyncSettings`）。
+- 切换提醒（`SWITCH_NOTICE_TEXT`、`createSwitchNoticeMessage`、`withSwitchNotice`）：为「切换电脑后首次续聊」注入一次本包自有 source kind 的 `notice` 消息。
 - HTTP 面（`registerSessionSyncRoutes`、路由路径、wire 类型），挂载 `webServer` 时注册到 harness 的开放路由缝。
 
 浏览器半边见 [`@linbin-mk/dsh-client-ui-settings-sync`](https://www.npmjs.com/package/@linbin-mk/dsh-client-ui-settings-sync)。
@@ -25,7 +25,7 @@ dsh-session-sync 插件的 host 半边：DeepSeek Harness 的 git 后端自动�
     startupSyncDelayMs: 3000
 ```
 
-要求 `settings` 与 `sessionPersistence` 服务；`workspaceRegistry` 可选（存在时导入的会话会挂到工作区，仓库里每个项目的 `archived.json` 标记也会应用到本机归档集合，让其他电脑上归档的会话在本机同样隐藏）。`webServer` 同样可选——没有它时插件以 headless 运行，只是不提供 Web 路由。切换提醒监听 harness 的 `agent/pre-step` 事件（`dsh-agent`/`dsh-llm` 依赖）：没有 agent 服务的部署只是永远不会触发注入。
+`config` 里的 `startupSyncDelayMs` 是部署项；`enabled`、`remote`、`branch`、`intervalMinutes`、`mappings`、`cleanup` 是设置页可写的活字段，写入由 harness 的 settings 服务落到 profile patch 文档。要求 `settings` 与 `sessionPersistence` 服务；`workspaceRegistry` 可选（存在时导入的会话会挂到工作区，仓库里每个项目的 `archived.json` 标记也会应用到本机归档集合，让其他电脑上归档的会话在本机同样隐藏）。`webServer` 同样可选——没有它时插件以 headless 运行，只是不提供 Web 路由。切换提醒监听 harness 的 `agent/pre-step` 事件（`dsh-agent`/`dsh-llm` 依赖）：没有 agent 服务的部署只是永远不会触发注入。
 
 ## 仓库格式
 
@@ -46,14 +46,16 @@ conflicts/<key>/<stem>-<host>.jsonl
 |---|---|---|
 | `/session-sync/status` | GET | 只读状态视图 |
 | `/session-sync/sync-now` | POST | 执行一个周期并返回最新状态 |
-| `/session-sync/settings` | GET | `{ writable, settings }` |
+| `/session-sync/cleanup-now` | POST | 执行一次 git 空间清理并返回最新状态 |
+| `/session-sync/settings` | GET | `{ writable, settings }`（供 memory 模式的页面只读展示） |
 | `/session-sync/settings` | POST | 合并 patch（host 校验，返回 `{ ok: true }` 或 `400 { error }`） |
+| `/session-sync/logs` | GET | 最近同步日志 |
 
 写路由强制同源校验并拒绝畸形请求体。
 
 ## 配置项
 
-`session-sync` 设置命名空间：`enabled`、`remote`（SSH 地址）、`branch`（默认 `main`）、`intervalMinutes`（默认 5）、`mappings: [{ key, path }]`。完整表格见[仓库 README](https://github.com/linbin-mk/dsh-session-sync#readme)。
+`session-sync` 这一行 profile 条目的 Cordis Config：`startupSyncDelayMs`（部署项，默认 3000）与用户可改的 `enabled`、`remote`（SSH 地址）、`branch`（默认 `main`）、`intervalMinutes`（默认 5）、`mappings: [{ key, path }]`、`cleanup`。设置页通过 harness 的 config form 读写这些字段（`ctx.configForms.get('session-sync')`），写入持久化在 profile patch 文档里。完整表格见[仓库 README](https://github.com/linbin-mk/dsh-session-sync#readme)。
 
 ## 开发
 

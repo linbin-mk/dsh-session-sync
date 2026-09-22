@@ -10,7 +10,7 @@
  */
 
 import { useEffect, useState } from 'react'
-import { Button, IconTrashOutline16, Input, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconTrashOutlineRegular, Input, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { HostObservable, PropsHooks, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: the global `useWorkspaces` standard-hook merge (ui-workspace).
 import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
@@ -409,7 +409,7 @@ export function SyncSection({
               aria-label={t('removeMapping', { key: mapping.key || `#${index + 1}` })}
               onClick={() => { removeMapping(index) }}
             >
-              <IconTrashOutline16 size={14} />
+              <IconTrashOutlineRegular size={14} />
             </button>
           </Tooltip>
         </div>

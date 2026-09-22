@@ -7,7 +7,7 @@
 
 dsh-session-sync 插件的浏览器半边：DeepSeek Harness Web GUI 的会话同步设置页（`settings.section` id `sync`）与侧栏状态点（`sidebar.footer.action` id `session-sync-status`）。
 
-插件数据全部经 host 自建的同源 HTTP API（`/session-sync/*`，普通 `fetch`）传输——浏览器包完全不碰 harness 的 RPC 表。工作区选项来自标准的 `useWorkspaces` hook。
+设置段走 harness 通用的 config form（`ctx.configForms.get('session-sync')`：读取、订阅推送，写入是带修订号围栏的 `mutate`），因此不碰 harness 的 RPC 表；状态、手动同步/清理与日志经 host 自建的同源 HTTP API（`/session-sync/*`，普通 `fetch`）传输。Host 把偏好保留在浏览器进程内的页面（非 loopback，`mode: 'memory'`）只读展示配置、禁用全部写入控件；config form 把 host 的拒绝压成 `false`，此时页面再用插件的 `POST /session-sync/settings` 取回拒绝原因。工作区选项来自标准的 `useWorkspaces` hook。
 
 host 半边见 [`@linbin-mk/dsh-session-sync`](https://www.npmjs.com/package/@linbin-mk/dsh-session-sync)。
 

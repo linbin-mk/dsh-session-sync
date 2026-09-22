@@ -2,10 +2,11 @@
 /** Sync status footer: visibility gating, health dot, and the last-sync detail. */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
-import { bindSnapshotSelector, makeTranslate } from './helpers.ts'
+import { bindSnapshotSelector, FakeConfigForm, makeTranslate } from './helpers.ts'
 import { SyncStatusFooter } from '../src/client/SyncStatusFooter.tsx'
 import type { SyncStatusFooterInjected, SyncStatusFooterProps } from '../src/client/SyncStatusFooter.tsx'
 import { SyncSectionController } from '../src/client/controller.ts'
+import type { SyncSettingsDraft } from '../src/client/controller.ts'
 import type { SyncApi } from '../src/client/api.ts'
 
 import { zh } from '../src/client/locales.ts'
@@ -56,7 +57,7 @@ async function mount(options: {
   wide?: boolean
 } = {}) {
   const api = options.api ?? fakeApi()
-  const controller = new SyncSectionController(api as SyncApi)
+  const controller = new SyncSectionController(api as SyncApi, new FakeConfigForm<SyncSettingsDraft>())
   const injected: SyncStatusFooterInjected = {
     controller,
     t,
@@ -117,7 +118,7 @@ describe('SyncStatusFooter', () => {
     vi.useFakeTimers()
     try {
       const api = fakeApi({ configured: true })
-      const controller = new SyncSectionController(api as SyncApi)
+      const controller = new SyncSectionController(api as SyncApi, new FakeConfigForm<SyncSettingsDraft>())
       const injected: SyncStatusFooterInjected = {
         controller,
         t,

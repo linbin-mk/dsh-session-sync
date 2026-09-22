@@ -42,7 +42,7 @@ harness 的 RPC 表（`apiproxy`）是编译器锁死的静态注册表——第
 | `/session-sync/settings` | POST | 合并一个 patch 到设置段（host 校验） |
 | `/session-sync/logs` | GET | 最近同步日志（保留窗口内，新的在前，`?limit=` 上限 500） |
 
-浏览器端用普通 `fetch` 调用这些路由。写路由拒绝跨源请求（`Origin` 头必须指向本服务器自身 host）和畸形请求体；设置服务对每次合并做重新校验。UI 唯一还在用 harness 通用接口的是工作区列表（`workspace.list`）——那是标准且未改动的面。
+浏览器端用普通 `fetch` 调用状态、手动操作与日志路由。写路由拒绝跨源请求（`Origin` 头必须指向本服务器自身 host）和畸形请求体。设置段的读写走 harness 通用的 config form（`ctx.configForms`，入口 id 就是 profile 里的 `session-sync` 行），由 harness 自己做修订号围栏与推送；插件自己的设置路由仍保留两个用途：`GET` 供 Host 把偏好保留在浏览器进程内的页面（非 loopback 页面，`mode: 'memory'`）只读展示配置，`POST` 是唯一带回 host 拒绝原因（如跨字段校验消息）的写入路径，页面在 config form 报 `false` 时用它取回原因。UI 唯一还在用 harness 通用接口的其余数据是工作区列表（`workspace.list`）——那是标准且未改动的面。
 
 ## 仓库结构
 
@@ -56,7 +56,7 @@ host 包包含同步引擎（`engine.ts`、`format.ts`、`git.ts`、`settings.ts
 ## 环境要求
 
 - Node.js `^22.19 || >=24`
-- DeepSeek Harness `0.1.5-rc.1`（所有 `@deepseek-ai/*` 依赖均使用 npm 发布版本，不含本机 harness 链接）
+- DeepSeek Harness `0.1.7-alpha.1`（所有 `@deepseek-ai/*` 依赖均使用 npm 发布版本，不含本机 harness 链接）
 - PATH 中有 `git`，且同步远端需要 SSH key（host key 策略：`StrictHostKeyChecking=accept-new`）
 - 只有从源码构建时才需要 pnpm
 
@@ -112,16 +112,19 @@ dsh plugin --profile web-sync remove \
 
 ## 配置项
 
-`session-sync` 设置命名空间：
+配置就是 profile 里 `session-sync` 这一行的 Cordis Config：所有用户可改字段都是「活引用」（`.volatile()`），harness 把每次设置写入提交进这些引用并持久化到 profile patch 文档（旧版 `settings.yaml` 里的 `session-sync` 段会被 harness 自动导入）。字段表：
 
 | 字段 | 含义 |
 |---|---|
+| `startupSyncDelayMs` | 启动后到首次自动周期的延迟（毫秒，默认 3000）。部署项：它不在设置页里，只有用户可改字段才是活引用。 |
 | `enabled` | 总开关；开启时 `remote` 必填。 |
 | `remote` | Git 远端地址（SSH）。凭据来自 `~/.ssh`。 |
 | `branch` | 同步分支；默认 `main`。 |
 | `intervalMinutes` | 自动同步间隔（分钟，最小 1，默认 5）。 |
 | `mappings` | `[{ key, path }]`：可移植项目 key 与本机目录。 |
 | `cleanup` | `{ enabled, periodHours, keepCommits }`：定期 git 空间清理开关、清理周期（小时，最小 1，默认 24）、保留的最近提交数量（最小 1，默认 200）。 |
+
+schema 管字段类型与取值范围，跨字段规则（开启必须有 `remote`、分支非空、映射 key/path 不重复或留空）由插件在每条写入路径上校验：设置页、profile patch 文档、以及 harness 导入旧 `settings.yaml` 时都先解析候选配置，不合规的写入不会落盘。
 
 节奏：启动 `startupSyncDelayMs` 后一个自动周期，之后每 `intervalMinutes` 一次，外加手动按钮；所有入口共用单飞守卫。清理在每次成功周期之后检查一次到期，外加设置页的立即清理按钮；清理与同步共用同一个工作树，通过各自的单飞守卫串行化。
 
@@ -136,7 +139,7 @@ dsh plugin --profile web-sync remove \
 
 ```sh
 pnpm install
-pnpm test        # 184 个测试：engine、format、git、log、settings、service、routes、组合、UI
+pnpm test        # 202 个测试：engine、format、git、log、settings、service、routes、组合、配置写入、UI
 pnpm typecheck
 pnpm build       # 两个包的 tsc + 浏览器 bundle（lib/client.js）
 ```
@@ -169,7 +172,7 @@ pnpm build       # 两个包的 tsc + 浏览器 bundle（lib/client.js）
 ## 已知限制
 
 - 状态刷新为轮询（页脚每 60 秒 + 每次操作后）；harness 内的事件推送路径需要核心权限，故刻意不用。
-- 直接编辑设置文件后，下次页面加载才会生效，不做实时推送。
+- 设置改动由 harness 推送到已打开的设置页（config form 订阅 + `settings/document-updated`），无需刷新。
 - 仅支持 SSH 远端；HTTPS + token 未实现。
 - 投影预热是 fail-soft 的：某次预热失败（如持久化读异常）时该行暂时退回项目名显示，点开会话或以后再次导入时会刷新。
 - 冲突副本需要手动处理；页面只显示数量。

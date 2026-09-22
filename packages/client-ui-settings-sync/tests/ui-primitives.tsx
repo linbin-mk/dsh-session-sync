@@ -12,6 +12,6 @@ export function Tooltip({ children }: { children: ReactNode }) {
   return <>{children}</>
 }
 
-export function IconTrashOutline16({ size }: { size?: number }) {
+export function IconTrashOutlineRegular({ size }: { size?: number }) {
   return <svg aria-hidden="true" width={size} height={size} />
 }

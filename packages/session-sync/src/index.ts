@@ -5,9 +5,9 @@
  * session archived on one machine is hidden on every machine). An archived
  * session is retired from git — its repo artifact is deleted so archived
  * sessions stop consuming repo space — while only the grow-only mark in
- * `archived.json` keeps travelling. Configuration lives in the
- * `session-sync` settings namespace (remote, branch, cadence, project
- * mappings); the worktree lives under `<harness home>/session-sync/repo`. Automatic cycles run on a timer
+ * `archived.json` keeps travelling. Configuration is the `session-sync`
+ * profile entry's live Config (remote, branch, cadence, project mappings);
+ * the worktree lives under `<harness home>/session-sync/repo`. Automatic cycles run on a timer
  * driven by `intervalMinutes`, once shortly after startup, and on demand via
  * `syncNow()` (the web settings page's button). Every cycle is contained:
  * session-level failures are reported on the status view, and only git
@@ -23,7 +23,7 @@
  *
  * Switch notice: every cycle that imports foreign events into a session arms
  * a one-shot mark for that session (persisted under the harness home, so a
- * restart keeps it). A `agent/pre-step` listener then folds a plugin
+ * restart keeps it). A `agent/pre-step` listener then folds this package's
  * `notice` message into the first user chat of a marked session — the first
  * chat after the machine switch — telling the model that the history came
  * from another machine and the local working directory is authoritative.
@@ -43,14 +43,18 @@
  * @module @linbin-mk/dsh-session-sync
  */
 
-import { Context, Service } from '@deepseek-ai/cordis'
+import { Service } from '@deepseek-ai/cordis'
+import type { Context, Fiber } from '@deepseek-ai/cordis'
 import type { PreStepDecision } from '@deepseek-ai/dsh-agent'
 import z from '@deepseek-ai/schemastery'
 import { mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises'
 import { hostname } from 'node:os'
 import { dirname, join } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
-import type { SettingsScope } from '@deepseek-ai/dsh-settings'
+// Type-only: applies the `ctx.settings` Context merge.
+import type {} from '@deepseek-ai/dsh-settings'
+// Type-only: applies the Loader's `loader/volatile-update` event merge.
+import type {} from '@deepseek-ai/cordis-plugin-loader'
 // Type-only: applies the `ctx.sessionPersistence` Context merge.
 import type {} from '@deepseek-ai/dsh-session-persistence'
 // Type-only: applies the `ctx.workspaceRegistry` Context merge.
@@ -63,18 +67,19 @@ import { GitRepository } from './git.ts'
 import { SyncLog } from './log.ts'
 import type { SyncLogEntry } from './log.ts'
 import {
-  SESSION_SYNC_NAMESPACE, SessionSyncSettingsSchema, validateSessionSyncSettings,
+  Config, DEFAULT_STARTUP_SYNC_DELAY_MS, SESSION_SYNC_NAMESPACE, readSettings, validateSessionSyncSettings,
 } from './settings.ts'
-import type { SessionSyncSettings } from './settings.ts'
+import type { ConfigInput, SessionSyncSettings } from './settings.ts'
 import { withSwitchNotice } from './switch-notice.ts'
 import { registerSessionSyncRoutes } from './routes.ts'
 import type { SessionSyncWebServer } from './routes.ts'
 
 export {
-  DEFAULT_CLEANUP_KEEP_COMMITS, DEFAULT_CLEANUP_PERIOD_HOURS,
-  SESSION_SYNC_NAMESPACE, SessionSyncSettingsSchema, validateSessionSyncSettings,
+  Config, DEFAULT_BRANCH, DEFAULT_CLEANUP_KEEP_COMMITS, DEFAULT_CLEANUP_PERIOD_HOURS,
+  DEFAULT_INTERVAL_MINUTES, DEFAULT_STARTUP_SYNC_DELAY_MS,
+  SESSION_SYNC_NAMESPACE, readSettings, validateSessionSyncSettings,
 } from './settings.ts'
-export type { SessionSyncCleanupSettings, SessionSyncMapping, SessionSyncSettings } from './settings.ts'
+export type { ConfigInput, SessionSyncCleanupSettings, SessionSyncMapping, SessionSyncSettings } from './settings.ts'
 export { compareLogs, runSyncCycle } from './engine.ts'
 export type {
   LogRelation, SyncEngineDeps, SyncFilesystem, SyncGit, SyncPersistence,
@@ -93,24 +98,6 @@ export {
   createSwitchNoticeMessage, withSwitchNotice,
 } from './switch-notice.ts'
 export type { SwitchNoticeDecision } from './switch-notice.ts'
-
-/** Default delay between startup and the first automatic cycle (lets cold loads settle). */
-export const DEFAULT_STARTUP_SYNC_DELAY_MS = 3_000
-
-/**
- * Plugin config. The startup delay is a deployment choice: cold session
- * listing and workspace bootstrap need a quiet moment before the first git
- * round-trip.
- */
-export interface Config {
-  /** Milliseconds after startup before the first automatic cycle. */
-  startupSyncDelayMs: number
-}
-
-/** Config schema. */
-export const Config: z<Config> = z.object({
-  startupSyncDelayMs: z.number().step(1).min(0).default(DEFAULT_STARTUP_SYNC_DELAY_MS),
-})
 
 /** Payload of the `session-sync/completed` event. */
 export interface SessionSyncCompleted {
@@ -150,18 +137,32 @@ function configuredSettings(settings: SessionSyncSettings): boolean {
   return settings.enabled && settings.remote.trim().length > 0
 }
 
+/** Whether a value is a plain data object the settings document merges field by field. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const proto: unknown = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
+}
+
+/** Layer `over` onto `under` the way the settings document does: plain objects merge, every other value replaces. */
+function mergeLayers(under: unknown, over: unknown): unknown {
+  if (!isPlainObject(under) || !isPlainObject(over)) return over
+  const merged: Record<string, unknown> = { ...under }
+  for (const [key, value] of Object.entries(over)) merged[key] = mergeLayers(merged[key], value)
+  return merged
+}
+
 /**
- * The service. Registers its settings namespace on init, reschedules the
- * automatic timer on every settings commit, and serializes cycles through a
- * single in-flight promise so a timer tick and a manual request can never
- * interleave two git sessions.
+ * The service. Reads its live configuration from the `session-sync` profile
+ * entry's Config, reschedules the automatic timer on every committed config
+ * change, and serializes cycles through a single in-flight promise so a timer
+ * tick and a manual request can never interleave two git sessions.
  */
 export class SessionSyncService extends Service {
   static inject = ['settings', 'sessionPersistence']
 
-  static Config: z<Config> = Config
+  static Config: z<ConfigInput, Config> = Config
 
-  private scope?: SettingsScope<SessionSyncSettings>
   private timer: ReturnType<typeof setInterval> | undefined
   private inflight: Promise<void> | undefined
   /** In-flight git-space cleanup pass; cycles skip their due check while one runs. */
@@ -179,8 +180,14 @@ export class SessionSyncService extends Service {
   private cleanupError: string | undefined
   /** ISO-8601 instant the last cleanup failure occurred, when one did. */
   private cleanupErrorAt: string | undefined
+  /**
+   * This machine's session-sync directory under the harness home, resolved
+   * once: the repository, the switch-notice marks, and the cycle log all live
+   * under it, and a running service keeps the home it started in.
+   */
+  private readonly home = dshHomePath('session-sync')
   /** The cycle log (per-day JSONL under the harness home, 3-day window). */
-  private readonly syncLog = new SyncLog(dshHomePath('session-sync', 'logs'))
+  private readonly syncLog = new SyncLog(join(this.home, 'logs'))
   /** Session ids this machine imported and has not noticed yet (switch-notice marks). */
   private readonly pendingSwitchNotices = new Set<string>()
   /** Lazy one-time load of the persisted marks file (awaited before the first review). */
@@ -193,18 +200,24 @@ export class SessionSyncService extends Service {
     super(ctx, 'sessionSync')
   }
 
-  /** Register the settings namespace, arm the timer plus startup pull, and serve the web API when a web server exists. */
+  /** Validate the resolved config, arm the timer plus startup pull, and serve the web API when a web server exists. */
   protected [Service.init](): void {
-    const scope = this.ctx.settings.register(
-      SESSION_SYNC_NAMESPACE,
-      SessionSyncSettingsSchema,
-      { applies: 'live', validate: validateSessionSyncSettings },
-    )
-    this.scope = scope
-    const webServer = this.ctx.get('webServer') as SessionSyncWebServer | undefined
-    if (webServer !== undefined) {
-      this.ctx.effect(() => registerSessionSyncRoutes(webServer, this), 'sessionSync.webApi')
-    }
+    const fiber = this.ctx.fiber
+    // A stored section the schema accepts but these rules reject fails the
+    // plugin at load, the way the removed namespace registration did.
+    validateSessionSyncSettings(this.getSettings())
+    // This plugin ships its own settings page; suppress the generated one.
+    this.ctx.effect(() => this.ctx.settings.configure({ auto: false }, fiber), 'sessionSync.settingsPage')
+    // The browser page reaches status, manual actions, and the cycle log over
+    // this plugin's own routes. `inject` waits for the optional web server, so
+    // a composition that mounts one after this row still gets them; a headless
+    // composition simply never runs the callback.
+    this.ctx.inject(['webServer'], (child) => {
+      const webServer = child.get('webServer') as SessionSyncWebServer | undefined
+      /* v8 ignore next -- the injected fiber is created only while the service is available */
+      if (webServer === undefined) return
+      child.effect(() => registerSessionSyncRoutes(webServer, this), 'sessionSync.webApi')
+    })
     // Switch notice: review every pre-step for the first real user chat of a
     // session this machine imported. The listener is disposed with the context.
     this.ctx.on('agent/pre-step', async ({ agent, messages, signal }, next): Promise<PreStepDecision> => {
@@ -218,30 +231,34 @@ export class SessionSyncService extends Service {
       }
       return reviewed.decision
     })
+    // The Loader commits a live edit into the Config references without
+    // remounting this plugin; the recomputed section re-arms the timer.
+    this.ctx.on('loader/volatile-update', () => { this.reschedule(this.getSettings()) })
+    // Every write path (the settings page, the profile document, the legacy
+    // settings.yaml import) resolves the candidate config before persisting
+    // it; the rules a schema cannot express are enforced here, so a refused
+    // write never reaches the profile document.
+    this.ctx.on('internal/config', function (this: Fiber, _raw: unknown, next: () => unknown): unknown {
+      const candidate = next()
+      if (this !== fiber) return candidate
+      validateSessionSyncSettings(readSettings(Config(candidate as never)))
+      return candidate
+    })
     this.ctx.effect(() => {
       // Enforce the log retention window once at startup; later accesses re-prune.
       void this.syncLog.prune().catch(error => {
         /* v8 ignore next -- real prune faults warn and leave the window to the next access */
         this.ctx.logger.warn(`session sync: log prune failed: ${messageOf(error)}`)
       })
-      const unwatch = scope.watch((next) => { this.reschedule(next) })
-      this.reschedule(scope.get())
+      this.reschedule(this.getSettings())
       const startup = setTimeout(() => {
-        if (configuredSettings(scope.get())) this.launchIfIdle()
+        if (configuredSettings(this.getSettings())) this.launchIfIdle()
       }, this.config.startupSyncDelayMs)
       return () => {
-        unwatch()
         clearInterval(this.timer)
         clearTimeout(startup)
       }
     }, 'sessionSync.lifecycle')
-  }
-
-  /** The settings scope assigned during init — callers only exist post-init. */
-  private requireScope(): SettingsScope<SessionSyncSettings> {
-    /* v8 ignore next -- init assigns the scope before the service becomes injectable */
-    if (this.scope === undefined) throw new Error('session sync is not initialized')
-    return this.scope
   }
 
   /** Whether the mounted settings provider accepts writes (web API surface). */
@@ -251,17 +268,21 @@ export class SessionSyncService extends Service {
 
   /** The resolved settings section (web API surface). */
   getSettings(): SessionSyncSettings {
-    return this.requireScope().get()
+    return readSettings(this.config)
   }
 
   /** Merge one plain-object patch into the settings section; the host re-validates and a refused write rejects (web API surface). */
   async updateSettings(patch: object): Promise<void> {
-    await this.requireScope().update(patch)
+    // Schema first (types, ranges, defaults), then the cross-field rules, so a
+    // malformed patch is refused with the schema's own message.
+    const merged = mergeLayers(this.getSettings(), patch)
+    validateSessionSyncSettings(readSettings(Config(merged as never)))
+    await this.ctx.settings.update(SESSION_SYNC_NAMESPACE, patch)
   }
 
   /** Current status view (no I/O). */
   status(): import('./api.ts').SessionSyncStatusView {
-    const settings = this.requireScope().get()
+    const settings = this.getSettings()
     return {
       configured: configuredSettings(settings),
       repoReady: this.repoReady,
@@ -292,7 +313,7 @@ export class SessionSyncService extends Service {
    * @returns the status view after the cycle settles.
    */
   async syncNow(): Promise<import('./api.ts').SessionSyncStatusView> {
-    if (!configuredSettings(this.requireScope().get())) {
+    if (!configuredSettings(this.getSettings())) {
       this.lastError = 'session sync is disabled or has no configured remote'
       this.lastErrorAt = new Date().toISOString()
       await this.logEntry({ time: this.lastErrorAt, kind: 'failure', error: this.lastError })
@@ -310,7 +331,7 @@ export class SessionSyncService extends Service {
    * @returns the status view after the pass settles.
    */
   async cleanupNow(): Promise<import('./api.ts').SessionSyncStatusView> {
-    if (!configuredSettings(this.requireScope().get())) {
+    if (!configuredSettings(this.getSettings())) {
       this.cleanupError = 'session sync is disabled or has no configured remote'
       this.cleanupErrorAt = new Date().toISOString()
       await this.logEntry({ time: this.cleanupErrorAt, kind: 'failure', error: `git-space cleanup failed: ${this.cleanupError}` })
@@ -371,7 +392,7 @@ export class SessionSyncService extends Service {
    * @returns the number of commits dropped (0 when within budget or failed).
    */
   private async cleanupPass(): Promise<number> {
-    const settings = this.requireScope().get()
+    const settings = this.getSettings()
     const repository = new GitRepository(this.repoDir())
     const startedAt = Date.now()
     try {
@@ -402,7 +423,7 @@ export class SessionSyncService extends Service {
 
   /** Marks file under the harness home (same directory as the repo worktree). */
   private switchMarksPath(): string {
-    return dshHomePath('session-sync', 'switch-notices.json')
+    return join(this.home, 'switch-notices.json')
   }
 
   /** Await the lazily-started marks load (one small file read at boot). */
@@ -461,7 +482,7 @@ export class SessionSyncService extends Service {
 
   /** One contained cycle: engine over real services, status update, event emission. */
   private async cycle(): Promise<void> {
-    const settings = this.requireScope().get()
+    const settings = this.getSettings()
     /* v8 ignore next 2 -- every launch path checks the settings first; the guard backs launchIfIdle against misuse */
     if (!configuredSettings(settings)) return
     const startedAt = Date.now()
@@ -546,7 +567,7 @@ export class SessionSyncService extends Service {
 
   /** Worktree directory under the harness home. */
   private repoDir(): string {
-    return dshHomePath('session-sync', 'repo')
+    return join(this.home, 'repo')
   }
 
   /** Persistence port over `ctx.sessionPersistence`. */

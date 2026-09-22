@@ -4,6 +4,14 @@
  * service, so no harness RPC table entry is required. Responses are decoded
  * with light shape checks: the host owns validation, and a malformed
  * response surfaces as a load failure instead of corrupting the page state.
+ *
+ * The settings section itself rides the shared configuration form of the
+ * `session-sync` Host entry (reads, pushed updates, revision-fenced writes).
+ * This client still serves two settings cases the form does not: `getSettings`
+ * for a page the Host keeps process-local (`mode: 'memory'`), which displays
+ * the resolved section read-only, and `updateSettings` as the only path that
+ * answers the Host's refusal message — the shared form reports a refusal as a
+ * plain `false` and drops the reason.
  * @module @linbin-mk/dsh-client-ui-settings-sync/client/api
  */
 
@@ -21,7 +29,7 @@ export interface SyncApi {
   logs(limit?: number): Promise<SyncLogEntry[]>
   /** The settings view (writable flag + resolved section). */
   getSettings(): Promise<SessionSyncSettingsView>
-  /** Merge one plain-object patch into the settings section (host validates). */
+  /** Merge one plain-object patch through the plugin's validated settings route. */
   updateSettings(patch: object): Promise<void>
 }
 

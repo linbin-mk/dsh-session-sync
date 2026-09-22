@@ -1,17 +1,23 @@
 /**
- * Settings contract of the session-sync plugin: the `session-sync` namespace
- * schema, resolved value type, and the cross-field validation a schema cannot
- * express. The namespace is the plugin's complete durable configuration —
- * the git remote, branch, sync cadence, the project-key-to-local-path
- * mappings that decide which projects export and which imported sessions are
- * admitted into this machine's DSH, and the periodic git-space cleanup that
- * truncates the shared history to the newest commits.
+ * Configuration contract of the session-sync plugin: the live `session-sync`
+ * profile entry's section — the git remote, branch, sync cadence, the
+ * project-key-to-local-path mappings that decide which projects export and
+ * which imported sessions are admitted into this machine's DSH, and the
+ * periodic git-space cleanup that truncates the shared history to the newest
+ * commits — plus the cross-field validation a schema cannot express.
+ *
+ * The section is the plugin's Cordis Config, so it arrives as the Loader
+ * row's config and every editable field is a `.volatile()` reference: the
+ * harness commits a live edit into these references and the settings page
+ * addresses the entry by its id (`session-sync`), which is exported here as
+ * {@link SESSION_SYNC_NAMESPACE}.
  * @module @linbin-mk/dsh-session-sync/settings
  */
 
+import type { Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 
-/** Settings namespace registered by the session-sync service. */
+/** Profile entry id of the host row, and the settings namespace the browser half addresses. */
 export const SESSION_SYNC_NAMESPACE = 'session-sync'
 
 /** Default interval between automatic sync cycles, in minutes. */
@@ -25,6 +31,9 @@ export const DEFAULT_CLEANUP_PERIOD_HOURS = 24
 
 /** Default number of newest commits the rewritten history keeps. */
 export const DEFAULT_CLEANUP_KEEP_COMMITS = 200
+
+/** Default delay between startup and the first automatic cycle (lets cold loads settle). */
+export const DEFAULT_STARTUP_SYNC_DELAY_MS = 3_000
 
 /** One project relationship: the portable key used in the git repo and the machine-local directory. */
 export interface SessionSyncMapping {
@@ -51,7 +60,7 @@ export interface SessionSyncCleanupSettings {
   keepCommits: number
 }
 
-/** Resolved settings value for the `session-sync` namespace. */
+/** Resolved settings value for the `session-sync` profile entry. */
 export interface SessionSyncSettings {
   /** Master switch; a disabled plugin never touches git or the repo. */
   enabled: boolean
@@ -67,22 +76,87 @@ export interface SessionSyncSettings {
   cleanup: SessionSyncCleanupSettings
 }
 
-/** Schema for the `session-sync` settings namespace. */
-export const SessionSyncSettingsSchema: z<SessionSyncSettings> = z.object({
-  enabled: z.boolean().default(false),
-  remote: z.string().default(''),
-  branch: z.string().default(DEFAULT_BRANCH),
-  intervalMinutes: z.number().step(1).min(1).default(DEFAULT_INTERVAL_MINUTES),
+/**
+ * Plugin configuration. The settings section is live — the plugin re-reads it
+ * for every cycle and every settings write commits into these references —
+ * while the startup delay is a deployment choice fixed by the composition.
+ */
+export interface Config {
+  /** Milliseconds after startup before the first automatic cycle. */
+  startupSyncDelayMs: number
+  /** Master switch; a disabled plugin never touches git or the repo. */
+  enabled: Volatile<boolean>
+  /** Git remote URL (SSH); required once `enabled`. */
+  remote: Volatile<string>
+  /** Remote branch to synchronize. */
+  branch: Volatile<string>
+  /** Automatic sync cadence in minutes (minimum 1). */
+  intervalMinutes: Volatile<number>
+  /** Project relationships: the sync whitelist in both directions. */
+  mappings: Volatile<SessionSyncMapping[]>
+  /** Periodic git-space cleanup. */
+  cleanup: Volatile<SessionSyncCleanupSettings>
+}
+
+/**
+ * Raw configuration a composition supplies: live fields take ordinary values
+ * and every field may be absent (defaults fill it).
+ */
+export interface ConfigInput {
+  /** Milliseconds after startup before the first automatic cycle. */
+  startupSyncDelayMs?: number
+  /** Master switch; a disabled plugin never touches git or the repo. */
+  enabled?: boolean
+  /** Git remote URL (SSH); required once `enabled`. */
+  remote?: string
+  /** Remote branch to synchronize. */
+  branch?: string
+  /** Automatic sync cadence in minutes (minimum 1). */
+  intervalMinutes?: number
+  /** Project relationships: the sync whitelist in both directions. */
+  mappings?: SessionSyncMapping[]
+  /** Periodic git-space cleanup. */
+  cleanup?: Partial<SessionSyncCleanupSettings>
+}
+
+/** Config schema. Every user-editable field is volatile; only they appear in settings forms. */
+export const Config: z<ConfigInput, Config> = z.object({
+  startupSyncDelayMs: z.number().step(1).min(0).default(DEFAULT_STARTUP_SYNC_DELAY_MS),
+  enabled: z.boolean().default(false).volatile(),
+  remote: z.string().default('').volatile(),
+  branch: z.string().default(DEFAULT_BRANCH).volatile(),
+  intervalMinutes: z.number().step(1).min(1).default(DEFAULT_INTERVAL_MINUTES).volatile(),
   mappings: z.array(z.object({
     key: z.string(),
     path: z.string(),
-  })).default([]),
+  })).default([]).volatile(),
   cleanup: z.object({
     enabled: z.boolean().default(false),
     periodHours: z.number().step(1).min(1).default(DEFAULT_CLEANUP_PERIOD_HOURS),
     keepCommits: z.number().step(1).min(1).default(DEFAULT_CLEANUP_KEEP_COMMITS),
-  }).default({ enabled: false, periodHours: DEFAULT_CLEANUP_PERIOD_HOURS, keepCommits: DEFAULT_CLEANUP_KEEP_COMMITS }),
+  }).default({ enabled: false, periodHours: DEFAULT_CLEANUP_PERIOD_HOURS, keepCommits: DEFAULT_CLEANUP_KEEP_COMMITS }).volatile(),
 })
+
+/**
+ * Read the settings section out of a resolved configuration.
+ * @param config - the plugin's resolved Cordis config.
+ * @returns the section's ordinary values, detached from the live references.
+ */
+export function readSettings(config: Config): SessionSyncSettings {
+  const cleanup = config.cleanup.get()
+  return {
+    enabled: config.enabled.get(),
+    remote: config.remote.get(),
+    branch: config.branch.get(),
+    intervalMinutes: config.intervalMinutes.get(),
+    mappings: config.mappings.get().map(mapping => ({ key: mapping.key, path: mapping.path })),
+    cleanup: {
+      enabled: cleanup.enabled,
+      periodHours: cleanup.periodHours,
+      keepCommits: cleanup.keepCommits,
+    },
+  }
+}
 
 /** Trimmed, non-empty form of a mapping key or path; `undefined` when blank. */
 function trimmed(value: string): string | undefined {

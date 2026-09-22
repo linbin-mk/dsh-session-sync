@@ -1,25 +1,22 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { Context } from '@deepseek-ai/cordis'
-import Loader from '@deepseek-ai/cordis-plugin-loader'
-import Include from '@deepseek-ai/cordis-plugin-include'
+import type { Context } from '@deepseek-ai/cordis'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
 import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageJson from '@deepseek-ai/dsh-storage-json'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import SettingsFile from '@deepseek-ai/dsh-settings-file'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SessionProjectionCache from '@deepseek-ai/dsh-session-projection-cache'
 import SessionTitleService from '@deepseek-ai/dsh-session-title'
-import SessionSyncService from '@linbin-mk/dsh-session-sync'
+import { composeSessionSync } from './compose.ts'
+import type { ComposeRow } from './compose.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -68,67 +65,39 @@ async function compose(prefix: string, home: string, extras: Record<string, unkn
   await mkdir(join(home, 'storages'), { recursive: true })
   await mkdir(join(home, 'sessions'), { recursive: true })
 
-  const configPath = join(root, 'cordis.yml')
-  await writeFile(configPath, [
-    "- name: '@deepseek-ai/dsh-storage'",
-    "- name: '@deepseek-ai/dsh-storage-json'",
-    '  config:',
-    `    root: ${JSON.stringify(join(home, 'storages'))}`,
-    "- name: '@deepseek-ai/dsh-storage-domain'",
-    '  config:',
-    '    backend: json',
-    "- name: '@deepseek-ai/dsh-session'",
-    "- name: '@deepseek-ai/dsh-settings-file'",
-    '  config:',
-    `    dshHome: ${JSON.stringify(home)}`,
-    '    watch: false',
-    "- name: '@deepseek-ai/dsh-session-persistence-jsonl'",
-    '  config:',
-    `    root: ${JSON.stringify(join(home, 'sessions'))}`,
-    "- name: '@deepseek-ai/dsh-workspace'",
-    ...Object.entries(extras).flatMap(([name, value]) => {
-      const extra = isExtra(value) ? value : { module: value }
-      const config = extra.config
-      return [
-        `- name: ${JSON.stringify(name)}`,
-        ...(config === undefined
-          ? []
-          : ['  config:', ...Object.entries(config).map(([key, field]) => `    ${key}: ${JSON.stringify(field)}`)]),
-      ]
-    }),
-    "- name: '@linbin-mk/dsh-session-sync'",
-    '',
-  ].join('\n'))
+  // The storage/session services a real deployment mounts; the plugin's own
+  // `session-sync` row is added by the shared composition helper.
+  const rows: ComposeRow[] = [
+    { id: 'storage', name: 'cordis:storage' },
+    { id: 'storage-json', name: 'cordis:storage-json', config: { root: join(home, 'storages') } },
+    { id: 'storage-domain', name: 'cordis:storage-domain', config: { backend: 'json' } },
+    { id: 'sessions', name: 'cordis:sessions' },
+    { id: 'session-persistence', name: 'cordis:session-persistence', config: { root: join(home, 'sessions') } },
+    { id: 'workspaces', name: 'cordis:workspaces' },
+  ]
+  const builtins: Record<string, unknown> = {
+    storage: Storage,
+    'storage-json': StorageJson,
+    'storage-domain': StorageDomain,
+    sessions: SessionStore,
+    'session-persistence': JsonlSessionPersistence,
+    workspaces: WorkspaceRegistry,
+  }
+  for (const [specifier, value] of Object.entries(extras)) {
+    const extra = isExtra(value) ? value : { module: value }
+    builtins[specifier] = extra.module
+    rows.push({
+      id: specifier,
+      name: `cordis:${specifier}`,
+      ...extra.config === undefined ? {} : { config: extra.config },
+    })
+  }
 
-  const context = new Context()
-  contexts.push(context)
-  context.baseUrl = pathToFileURL(root).href + '/'
-  await context.plugin(Loader)
-  context.loader.builtins.include = Include
-  const modules = new Map<string, unknown>([
-    ['@deepseek-ai/dsh-storage', Storage],
-    ['@deepseek-ai/dsh-storage-json', StorageJson],
-    ['@deepseek-ai/dsh-storage-domain', StorageDomain],
-    ['@deepseek-ai/dsh-session', SessionStore],
-    ['@deepseek-ai/dsh-settings-file', SettingsFile],
-    ['@deepseek-ai/dsh-session-persistence-jsonl', JsonlSessionPersistence],
-    ['@deepseek-ai/dsh-workspace', WorkspaceRegistry],
-    ['@linbin-mk/dsh-session-sync', SessionSyncService],
-    ...Object.entries(extras).map(([name, value]) => [name, isExtra(value) ? value.module : value] as const),
-  ])
-  context.loader.internal = {
-    version: 'v2',
-    async import(specifier: string) {
-      if (!modules.has(specifier)) throw new Error(`unexpected Loader import: ${specifier}`)
-      return modules.get(specifier)
-    },
-  } as unknown as NonNullable<typeof context.loader.internal>
-  await context.loader.create({
-    name: 'cordis:include',
-    config: { path: pathToFileURL(configPath).href },
-  })
-  await context.loader.await()
-  return { root, dshHome: home, context }
+  // No automatic cycles: this spec drives every cycle through `syncNow()`, so
+  // a startup timer can never race the machine the spec is exercising.
+  const composed = await composeSessionSync({ home, rows, builtins, startupSyncDelayMs: 3_600_000 })
+  contexts.push(composed.ctx)
+  return { root, dshHome: home, context: composed.ctx }
 }
 
 async function configureSync(ctx: Context, remote: string, path: string, key: string): Promise<void> {
@@ -229,10 +198,7 @@ describe('session-sync Loader composition', () => {
     // cold read would lazily write the same row; the pre-warm makes the very
     // first listing correct instead of falling back to the project name).
     const importedHandle = await machineB.context.sessionPersistence.open(SessionId('session-one'), 'read')
-    const titleRow = machineB.context.sessionProjectionCache.cachedSnapshot(
-      importedHandle.header,
-      importedHandle.inheritedEventCount,
-    )
+    const titleRow = machineB.context.sessionProjectionCache.cachedSnapshot(importedHandle.header)
     await importedHandle.close()
     expect(titleRow?.values.title).toBe('cross-machine title')
 
@@ -274,7 +240,9 @@ describe('session-sync Loader composition', () => {
     expect(statusC.lastRun.imported).toBe(0)
     expect(await machineC.context.sessionPersistence.list()).toEqual([])
     expect(machineC.context.workspaceRegistry.list()).toEqual([])
-  })
+    // Three booted harness compositions and several real git cycles: the
+    // per-test default is a load-dependent budget, not a deadlock detector.
+  }, 30_000)
 
   it('registers its HTTP routes on a mounted webServer and removes them on disposal', async () => {
     previousDshHome = process.env.DSH_HOME

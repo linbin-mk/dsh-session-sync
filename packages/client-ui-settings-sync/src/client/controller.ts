@@ -1,15 +1,19 @@
 /**
  * Session-sync settings page controller: one snapshot joining the
  * `session-sync` settings section, the host sync service status, and the
- * recent cycle log. The host stays the single fact source — every field edit
- * writes through the plugin's own HTTP API and the page re-renders from the
- * next read; manual sync answers the fresh status view directly and refreshes
- * the log. Shape checks stay light here: the host re-validates every merged
- * section, and this page's inputs come from the same schema the host owns.
+ * recent cycle log. The Host stays the single fact source — the section comes
+ * from the shared configuration form of the `session-sync` profile entry,
+ * every field edit is one revision-fenced form write, and status plus the
+ * cycle log ride the plugin's own same-origin HTTP API. A page the Host keeps
+ * process-local (`mode: 'memory'`) reads the resolved section from that API
+ * but never writes. Shape checks stay light here: the Host re-validates every
+ * write, and this page's inputs come from the same schema the Host owns.
  */
 
 import type { SnapshotStore } from './store.ts'
 import { createSnapshotStore } from './store.ts'
+// Type-only: the shared configuration form of one Host plugin entry.
+import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { SessionSyncStatusView, SyncLogEntry } from '@linbin-mk/dsh-session-sync'
 import type { SyncApi } from './api.ts'
 
@@ -116,6 +120,21 @@ function decodeSettings(value: unknown): SyncSettingsDraft | undefined {
 }
 
 /**
+ * Whether the page may persist an edit. The Host must accept writes AND serve
+ * the section to this client: a page the Host keeps process-local
+ * (`mode: 'memory'`, a non-loopback browser) never writes, whatever the
+ * plugin's own route reports.
+ * @param snapshot - the shared configuration form's current snapshot.
+ * @param routeWritable - the plugin's own settings view writable flag, used
+ * until the form has an answer of its own.
+ * @returns whether write controls are live.
+ */
+function writableFrom(snapshot: ConfigFormSnapshot<SyncSettingsDraft>, routeWritable: boolean): boolean {
+  if (snapshot.mode !== 'host') return false
+  return snapshot.status === 'ready' ? snapshot.writable : routeWritable
+}
+
+/**
  * The page controller (one per settings surface). Loads are generation-
  * guarded so an older response never overwrites a newer one.
  */
@@ -135,29 +154,29 @@ export class SyncSectionController {
 
   private generation = 0
 
-  /** @param api - the plugin's HTTP wire face. */
-  constructor(private readonly api: SyncApi) {}
+  /**
+   * @param api - the plugin's HTTP wire face (status, manual actions, log).
+   * @param form - the shared configuration form of the `session-sync` Host
+   * entry, which owns the settings section's reads and writes.
+   */
+  constructor(
+    private readonly api: SyncApi,
+    private readonly form: ConfigForm<SyncSettingsDraft>,
+  ) {}
 
   /**
-   * Refresh the page snapshot: the settings view and the sync status in
-   * parallel, then the cycle log (fail-soft — the log is auxiliary). A
-   * failure keeps the last good values and surfaces the error.
+   * Refresh the page snapshot: the sync status, then the settings section
+   * (the shared form when the Host serves it, otherwise the plugin's own
+   * route), then the cycle log (fail-soft — the log is auxiliary). A failure
+   * keeps the last good values and surfaces the error.
    * @returns nothing; the snapshot carries the outcome.
    */
   async load(): Promise<void> {
     const generation = ++this.generation
     this.store.update((state) => { state.status = 'loading'; state.error = null })
-    let writable: boolean
-    let settings: SyncSettingsDraft | undefined
     let sync: SessionSyncStatusView
     try {
-      const [settingsView, status] = await Promise.all([
-        this.api.getSettings(),
-        this.api.status(),
-      ])
-      writable = settingsView.writable
-      settings = decodeSettings(settingsView.settings)
-      sync = status
+      sync = await this.api.status()
     } catch (error) {
       if (generation !== this.generation) return
       this.store.update((state) => {
@@ -165,6 +184,27 @@ export class SyncSectionController {
         state.error = messageOf(error)
       })
       return
+    }
+    const snapshot = this.form.getSnapshot()
+    let writable = writableFrom(snapshot, true)
+    let settings = snapshot.status === 'ready' ? decodeSettings(snapshot.value) : undefined
+    if (settings === undefined) {
+      // The form has no section for this client yet (loading, or a
+      // process-local page): the plugin's own route still serves the resolved
+      // section read-only.
+      let view: { writable: boolean; settings: unknown }
+      try {
+        view = await this.api.getSettings()
+      } catch (error) {
+        if (generation !== this.generation) return
+        this.store.update((state) => {
+          state.status = 'error'
+          state.error = messageOf(error)
+        })
+        return
+      }
+      writable = writableFrom(snapshot, view.writable)
+      settings = decodeSettings(view.settings)
     }
     if (generation !== this.generation) return
     this.store.update((state) => {
@@ -175,6 +215,23 @@ export class SyncSectionController {
       state.sync = sync
     })
     await this.refreshLogs()
+  }
+
+  /**
+   * Adopt the shared form's accepted section into the snapshot. The form
+   * publishes on every accepted write and Host document change, so this
+   * refreshes the visible section without another round-trip.
+   * @returns nothing; the snapshot carries the accepted section.
+   */
+  adoptSettings(): void {
+    const snapshot = this.form.getSnapshot()
+    if (snapshot.status !== 'ready') return
+    const settings = decodeSettings(snapshot.value)
+    const writable = writableFrom(snapshot, true)
+    this.store.update((state) => {
+      state.writable = writable
+      if (settings !== undefined) state.settings = settings
+    })
   }
 
   /** Reload the cycle log into the snapshot (fail-soft: keeps the last good list). */
@@ -189,20 +246,42 @@ export class SyncSectionController {
   }
 
   /**
-   * Merge one patch into the `session-sync` settings section and reload the
-   * snapshot. The host rejects invalid sections; the reload then serves the
+   * Merge one patch into the `session-sync` settings section through the
+   * shared configuration form and reload the snapshot. The Host validates the
+   * merged section and refuses an invalid one; the reload then serves the
    * last good value.
    * @param patch - plain-object patch over the section (arrays replace wholesale).
    * @returns the failure message, or undefined once the write and reload landed.
    */
   async update(patch: object): Promise<string | undefined> {
+    const ops = Object.entries(patch).map(([field, value]) => ({ op: 'set' as const, path: [field], value }))
+    let accepted: boolean
     try {
-      await this.api.updateSettings(patch)
+      accepted = await this.form.mutate(ops)
     } catch (error) {
       return messageOf(error)
     }
+    if (!accepted && this.hostServed()) {
+      // The shared form reports a Host refusal as a plain `false` and drops
+      // the reason; the plugin's own validated route answers the same refusal
+      // with its message, so the page can still say why the value was kept.
+      try {
+        await this.api.updateSettings(patch)
+      } catch (error) {
+        return messageOf(error)
+      }
+    }
+    // The reload serves what the Host actually holds: the committed section
+    // after an accepted write, and the persisted section plus its read-only
+    // posture after a skipped one (a process-local page, or a disposed form).
     await this.load()
     return undefined
+  }
+
+  /** Whether a live, writable Host-served form owns this page's writes. */
+  private hostServed(): boolean {
+    const snapshot = this.form.getSnapshot()
+    return snapshot.status === 'ready' && snapshot.writable && snapshot.mode === 'host'
   }
 
   /**

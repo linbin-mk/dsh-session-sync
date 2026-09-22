@@ -8,6 +8,13 @@ import {
   createSwitchNoticeMessage, withSwitchNotice,
 } from '../src/switch-notice.ts'
 
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    /** A foreign plugin's notice; declared here to prove unknown kinds fall through. */
+    'other-plugin': { kind: 'other-plugin'; form: 'notice'; summary: string }
+  }
+}
+
 /** Minimal live-agent fake: the notice logic only reads the session id. */
 function agent(id: string): Agent {
   return { session: { id: SessionId(id) } } as unknown as Agent
@@ -23,7 +30,7 @@ function userMessage(text = '继续干活'): UserMessage {
 function pluginMessage(summary: string): UserMessage {
   return createUserMessage({
     content: [{ type: 'text', text: 'tool continuation' }],
-    source: { kind: 'plugin', plugin: 'other-plugin', form: 'notice', summary },
+    source: { kind: 'other-plugin', form: 'notice', summary },
   })
 }
 
@@ -36,8 +43,7 @@ describe('createSwitchNoticeMessage', () => {
     const notice = createSwitchNoticeMessage()
     expect(notice.role).toBe('user')
     expect(notice.source).toMatchObject({
-      kind: 'plugin',
-      plugin: SWITCH_NOTICE_PLUGIN,
+      kind: SWITCH_NOTICE_PLUGIN,
       form: 'notice',
       summary: SWITCH_NOTICE_SUMMARY,
     })
@@ -92,7 +98,7 @@ describe('withSwitchNotice', () => {
     expect(messages).toHaveLength(4)
     expect(messages[0]).toBe(first)
     expect(messages[1]).toBe(second)
-    expect(messages[2].source).toMatchObject({ kind: 'plugin', plugin: SWITCH_NOTICE_PLUGIN, form: 'notice' })
+    expect(messages[2].source).toMatchObject({ kind: SWITCH_NOTICE_PLUGIN, form: 'notice' })
     expect(messages[2].content).toEqual([{ type: 'text', text: SWITCH_NOTICE_TEXT }])
     expect(messages[3]).toBe(snapshot)
     expect(pending.has('session-a')).toBe(true) // the caller consumes the mark
@@ -109,7 +115,7 @@ describe('withSwitchNotice', () => {
     if (reviewed.decision.kind !== 'enter') return
     expect(reviewed.decision.messages).toHaveLength(2)
     expect(reviewed.decision.messages[0]).toBe(rewritten)
-    expect(reviewed.decision.messages[1].source).toMatchObject({ kind: 'plugin', plugin: SWITCH_NOTICE_PLUGIN })
+    expect(reviewed.decision.messages[1].source).toMatchObject({ kind: SWITCH_NOTICE_PLUGIN, form: 'notice' })
   })
 
   it('marks sessions per id, not globally', () => {
