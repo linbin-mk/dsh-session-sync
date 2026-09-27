@@ -7,7 +7,7 @@
 [![许可证](https://img.shields.io/npm/l/@linbin-mk/dsh-session-sync)](LICENSE)
 [![Node](https://img.shields.io/node/v/@linbin-mk/dsh-session-sync)](package.json)
 
-面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）的第三方会话同步插件：通过一个 git 仓库，在多台电脑之间同步你已映射项目的会话，并自带 Web 设置页。
+面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）的第三方会话同步插件：通过一个 git 仓库，在多台电脑之间同步**你置顶的**会话，并自带 Web 设置页。
 
 ```
 ┌───────────── 电脑 A ─────────────┐      ┌───────────── 电脑 B ─────────────┐
@@ -18,10 +18,13 @@
 ```
 
 - **会话跟着你走，机器路径不跟。** 已映射项目的逻辑事件日志导出为 `projects/<key>/<id>.jsonl`；插件自有的版本化文件头记录可移植项目 key 与 fork 继承事件数，不复制 harness JSONL 后端的私有文件、压缩或行编码。导入时项目 key 解析成本机映射路径。
-- **映射是双向白名单。** 只有映射过的项目会被上传；仓库里未映射项目的会话永远不会落入 DSH。
+- **置顶即同步，是唯一的选择器。** 同步范围 = 映射项目 ∩ 置顶会话：在侧栏把任意会话点成置顶，它就开始跨机同步（日志推送到 `projects/<key>/<id>.jsonl`）；取消置顶，它的仓库产物就在下一个周期被删除、停止同步。**本机会话在任何情况下都不会被删除**——取消置顶只让它退出同步，本地这份完整保留。
+- **置顶集合跟着走。** 每台机器把仓库根部的 `pinned.json`（跨机唯一真相，整份快照，不是并集）镜像进自己的置顶集合，因此一台机器上的置顶在所有机器上都会显示为置顶；取消置顶同理传播。为了不让"谁改了什么"互相打架，每台机器在 harness home 下记一份基线（`pins.json`）：自己的置顶变了就发布，没变就采纳仓库的。
+- **映射是双向白名单，置顶是内层门禁。** 只有映射过的项目会被上传；未映射项目的会话永远不会落入 DSH。映射项目里没被置顶的会话同样不上传、也不被导入。
+- **首次运行只采纳、不删除。** 一台还没跑过周期的机器（没有基线）不会把仓库里的选择当成「要取消置顶」，因此不会误删仓库产物。
 - **冲突策略：前缀合并 + 双副本。** 会话日志是只追加的事件流：一份日志是另一份的严格前缀时，更长者胜出；真正分叉时，远端尾巴原样保留在 `conflicts/<key>/<id>-<host>.jsonl` 并上报——数据绝不静默丢失。分叉时的导出永远不会覆盖仓库工件：仓库保留自己已有的一份稳定日志（互相覆盖会让它每个周期被毁掉），分叉的本地尾巴只进入冲突副本。
 - **未闭合 turn 不出网。** 没有以 `turn/end` 收尾的日志，要么正在所属电脑上实时运行，要么是崩溃后等待 harness 的「中断修复」。把它导出等于发布一个截断快照：导入方加载后会被 harness 补上合成的 `step/end` + `turn/end {interrupted}` 修复尾巴，从此与本机的真实后续内容永久分叉。因此导出跳过未闭合 turn 的日志（闭合后下一周期自然推送），导入也跳过未闭合 turn 的工件（旧版本插件留下的过期快照，所属电脑会用闭合日志替换它）。
-- **归档标记跟着走，归档内容退出 git。** 在一台电脑上归档的会话，通过 `projects/<key>/archived.json` 里的标记在每台电脑的会话列表中都隐藏，同时它位于 git 仓库里的 `projects/<key>/<id>.jsonl` 会在下一次同步时被删除——归档会话不再占用 git 空间。本机会话数据不受影响，只有只增标记继续传播，因此仓库里的标记只是简单并集，永远不会产生冲突。
+- **归档标记跟着走，归档内容退出 git。** 归档与置顶在 harness 里互斥，所以归档一个置顶会话同时也是取消它的同步：它会从 `pinned.json` 里移除，仓库产物删除。 在一台电脑上归档的会话，通过 `projects/<key>/archived.json` 里的标记在每台电脑的会话列表中都隐藏，同时它位于 git 仓库里的 `projects/<key>/<id>.jsonl` 会在下一次同步时被删除——归档会话不再占用 git 空间。本机会话数据不受影响，只有只增标记继续传播，因此仓库里的标记只是简单并集，永远不会产生冲突。
 - **导入即预热投影缓存。** 同步导入直接写持久化、绕过 live 会话存储，harness 的投影缓存不会自动折叠它；插件在每次导入后对会话做一次冷读预热（fail-soft），标题、子代理分组等列表行元数据立即可见，无需先点开会话。
 - **切换电脑后的首次续聊注入一次提醒。** 每当导入给某个会话带来来自其他电脑的新事件，插件就为它武装一个一次性标记（持久化在 harness home 下，重启不丢）。该会话的用户首次发消息时——经 harness 的 `agent/pre-step` 缝检测，与 AGENTS.md 加载器同一条注入路径——一条插件 `notice` 消息会紧跟在用户消息之后折入上下文，告知大模型：本会话历史是从另一台电脑同步而来的，历史路径可能与当前电脑不符，此后一律以当前工作目录为准。标记注入即消耗：同一台电脑继续聊天不会重复注入；提醒本身是持久事件、随日志一起同步，下次再换机器时那边首次续聊会注入自己的提醒。子代理会话除外。
 - **仓库只是传输介质。** 每个周期执行 fetch → 硬重置 → 导入 → 导出 → 提交 → 推送，git 合并冲突无从产生。远程命令（`ls-remote`、`fetch`、`push`）自带指数退避重试（默认最多 3 次尝试），一次瞬时的 SSH 连接损坏（如 `Bad packet length`）不再让整个周期报废；分支探测每个周期只做一次，`resetHard` 复用 fetch 的结果而不是再次探测远端。
@@ -53,6 +56,15 @@ packages/client-ui-settings-sync/  @linbin-mk/dsh-client-ui-settings-sync（浏�
 
 host 包包含同步引擎（`engine.ts`、`format.ts`、`git.ts`、`settings.ts`）、服务（`index.ts`）与 HTTP 层（`api.ts`、`routes.ts`）。浏览器包含设置页、状态页脚、页面控制器与 fetch 客户端。
 
+仓库格式（会话产物之外）：
+
+```text
+pinned.json                  { "version": 1, "updatedAt", "host", "sessionIds": [...] }
+projects/<key>/archived.json { "version": 1, "sessionIds": [...] }
+```
+
+`pinned.json` 是跨机同步选择：只有它选中的会话会写出产物，也是每台机器镜像进本机置顶集合的那份列表。它是**整份快照**而不是并集——取消置顶必须能传播，并集永远表达不了「移除」。
+
 ## 环境要求
 
 - Node.js `^22.19 || >=24`
@@ -60,7 +72,12 @@ host 包包含同步引擎（`engine.ts`、`format.ts`、`git.ts`、`settings.ts
 - PATH 中有 `git`，且同步远端需要 SSH key（host key 策略：`StrictHostKeyChecking=accept-new`）
 - 只有从源码构建时才需要 pnpm
 
-此版本改用插件自有的逻辑事件工件格式，并且有意不导入旧版 raw-storage 实现生成的工件。连接其他电脑前，请使用空同步仓库（或先清空旧仓库内容）。
+### 0.3.0 破坏性变更：全量同步 → 只同步置顶会话
+
+- 同步选择从「映射项目里的全部会话」收敛为「映射项目 ∩ 置顶会话」。升级后**请先在常用电脑上把要保留的会话逐个置顶**；第一个周期会把仓库里非置顶的会话产物一次性清掉（本机会话不受影响，仓库历史里也还留着旧版本）。
+- 取消置顶只让会话退出同步并删除它在仓库里的产物，**不会删除任何机器上的本地会话**。
+- 仓库根的 `pinned.json` 是新增的、跨机共享的选择文件；本机基线 `pins.json` 只为判断「是你改了置顶，还是别人改了仓库」，可以安全删除（代价是下一周期改成采纳仓库）。
+- 不提供「全量同步」回退开关：此版本只有置顶一种模式。
 
 ## 安装
 
@@ -108,7 +125,7 @@ dsh plugin --profile web-sync remove \
   name: '@linbin-mk/dsh-client-ui-settings-sync'
 ```
 
-安装会自动加入上面的两行。host 插件要求 `settings` 与 `sessionPersistence` 服务；存在 `workspaceRegistry` 时，导入的会话会挂到工作区，并把仓库里的归档标记应用到本机的归档集合；存在 `sessionProjectionCache`（可选注入）时，导入完成即预热投影缓存，让列表行立刻带出标题等投影值。浏览器插件注册 `settings.section`（`sync`）设置页与 `sidebar.footer.action`（`session-sync-status`）状态点。
+安装会自动加入上面的两行。host 插件要求 `settings` 与 `sessionPersistence` 服务；存在 `workspaceRegistry` 时，置顶集合就是同步选择（导入的会话会挂到工作区、按仓库的 `pinned.json` 置顶，并把仓库里的归档标记应用到本机的归档集合）；存在 `sessionProjectionCache`（可选注入）时，导入完成即预热投影缓存，让列表行立刻带出标题等投影值。浏览器插件注册 `settings.section`（`sync`）设置页与 `sidebar.footer.action`（`session-sync-status`）状态点。
 
 ## 配置项
 
@@ -126,7 +143,7 @@ dsh plugin --profile web-sync remove \
 
 schema 管字段类型与取值范围，跨字段规则（开启必须有 `remote`、分支非空、映射 key/path 不重复或留空）由插件在每条写入路径上校验：设置页、profile patch 文档、以及 harness 导入旧 `settings.yaml` 时都先解析候选配置，不合规的写入不会落盘。
 
-节奏：启动 `startupSyncDelayMs` 后一个自动周期，之后每 `intervalMinutes` 一次，外加手动按钮；所有入口共用单飞守卫。清理在每次成功周期之后检查一次到期，外加设置页的立即清理按钮；清理与同步共用同一个工作树，通过各自的单飞守卫串行化。
+节奏：启动 `startupSyncDelayMs` 后一个自动周期，之后每 `intervalMinutes` 一次，外加手动按钮；所有入口共用单飞守卫。因为 harness 没有「置顶动作」的事件缝，插件另有一个 30 秒的看门狗（`DEFAULT_WATCHDOG_INTERVAL_MS`）比较本机置顶集合与基线，发现你刚改了置顶就立刻跑一个周期——置顶→同步的延迟上限是 30 秒（看门狗）+ 对端一个周期；对端想更快可以把 `intervalMinutes` 调到 1。清理在每次成功周期之后检查一次到期，外加设置页的立即清理按钮；清理与同步共用同一个工作树，通过各自的单飞守卫串行化。
 
 ## 安全姿态
 

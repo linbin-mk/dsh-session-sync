@@ -58,8 +58,12 @@ const statusView: SessionSyncStatusView = {
   configured: true,
   repoReady: true,
   running: false,
+  pinnedCount: 2,
   lastSyncAt: '2026-08-16T00:00:00.000Z',
-  lastRun: { imported: 1, pushed: 2, archived: 1, deleted: 1, conflicts: [] },
+  lastRun: {
+    imported: 1, pushed: 2, archived: 1, deleted: 1, deletedUnpinned: 1,
+    pinned: 1, unpinned: 1, conflicts: [],
+  },
 }
 
 const settingsValue: SessionSyncSettings = {

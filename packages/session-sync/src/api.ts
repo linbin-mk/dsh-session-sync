@@ -20,6 +20,11 @@ export interface SessionSyncStatusView {
   repoReady: boolean
   /** A cycle is currently running. */
   running: boolean
+  /**
+   * Sessions this machine currently selects for synchronization — its own pin
+   * set, which is what the plugin mirrors to and from the repo.
+   */
+  pinnedCount: number
   /** ISO-8601 instant the last cycle finished successfully, when one did. */
   lastSyncAt?: string
   /** Message of the last cycle-level failure, when one occurred. */
@@ -27,7 +32,19 @@ export interface SessionSyncStatusView {
   /** ISO-8601 instant the last cycle-level failure occurred, when one did. */
   lastErrorAt?: string
   /** Outcome of the last completed cycle. */
-  lastRun: { imported: number; pushed: number; archived: number; deleted: number; conflicts: string[] }
+  lastRun: {
+    imported: number
+    pushed: number
+    archived: number
+    deleted: number
+    /** Repo artifacts the cycle retired because the pin selection dropped them. */
+    deletedUnpinned: number
+    /** Sessions the cycle pinned to mirror the repo's selection. */
+    pinned: number
+    /** Sessions the cycle unpinned because the repo's selection dropped them. */
+    unpinned: number
+    conflicts: string[]
+  }
   /** Outcome of the last completed git-space cleanup pass, when one ran. */
   lastCleanup?: { at: string; dropped: number }
   /** Message of the last cleanup failure, when one occurred. */

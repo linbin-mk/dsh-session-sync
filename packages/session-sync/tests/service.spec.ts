@@ -7,13 +7,13 @@ import { promisify } from 'node:util'
 import { readFileSync } from 'node:fs'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { SESSION_FORMAT_VERSION, SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader, UserMessage } from '@deepseek-ai/dsh-session'
 import type SessionSyncService from '../src/index.ts'
 import type { SessionSyncCompleted } from '../src/index.ts'
 import { parsePortableSession } from '../src/format.ts'
-import { composeSessionSync } from './compose.ts'
+import { composeSessionSync, fakeWorkspaceRegistry } from './compose.ts'
 import { fakePersistence } from './persistence-double.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -23,11 +23,53 @@ declare module '@deepseek-ai/dsh-llm' {
   }
 }
 
-const execFileAsync = promisify(execFile)
-
 let roots: string[] = []
 let contexts: Context[] = []
 let previousDshHome: string | undefined
+
+const execFileAsync = promisify(execFile)
+
+/** One file the remote's `main` should carry before a cycle pulls it. */
+interface RemoteFile {
+  /** Repo-relative path. */
+  path: string
+  /** File content. */
+  content: string
+}
+
+/**
+ * Commit files straight onto a remote's `main` through a scratch clone. The
+ * engine resets its worktree to the remote state at the start of every cycle,
+ * so anything a spec wants the next cycle to see — the pin selection that
+ * admits artifacts, the artifacts themselves — has to live on the remote.
+ * @param bare - bare remote the machine pushes to and pulls from.
+ * @param files - repo-relative files to commit.
+ */
+async function seedRemote(bare: string, files: readonly RemoteFile[]): Promise<void> {
+  const work = await mkdtemp(join(tmpdir(), 'dsh-sync-seed-'))
+  roots.push(work)
+  await execFileAsync('git', ['clone', bare, work])
+  await execFileAsync('git', ['-C', work, 'config', 'user.name', 'spec'])
+  await execFileAsync('git', ['-C', work, 'config', 'user.email', 'spec@example.com'])
+  for (const file of files) {
+    const target = join(work, ...file.path.split('/'))
+    await mkdir(dirname(target), { recursive: true })
+    await writeFile(target, file.content)
+  }
+  await execFileAsync('git', ['-C', work, 'add', '-A'])
+  await execFileAsync('git', ['-C', work, 'commit', '--allow-empty', '-m', 'seed remote'])
+  await execFileAsync('git', ['-C', work, 'push', 'origin', 'main'])
+}
+
+/** The repo pin list a remote should carry for the given selection. */
+function pinListFile(ids: readonly string[]): RemoteFile {
+  return {
+    path: 'pinned.json',
+    content: JSON.stringify({
+      version: 1, updatedAt: '2026-01-01T00:00:00.000Z', host: 'seed', sessionIds: [...ids],
+    }) + '\n',
+  }
+}
 
 function sessionHeader(id: string, cwd: string): SessionHeader {
   return {
@@ -73,6 +115,7 @@ async function compose(
     projectionCache?: {
       coldSnapshot(meta: unknown, inheritedEventCount: unknown, events: unknown): unknown
     }
+    workspaces?: ReturnType<typeof fakeWorkspaceRegistry>
   } = {},
 ): Promise<{
   ctx: Context
@@ -97,6 +140,7 @@ async function compose(
     ...options.settings === undefined ? {} : { config: options.settings },
     persistence,
     ...options.projectionCache === undefined ? {} : { projectionCache: options.projectionCache },
+    ...options.workspaces === undefined ? {} : { workspaces: options.workspaces },
   })
   contexts.push(composed.ctx)
   return {
@@ -146,7 +190,10 @@ describe('SessionSyncService', () => {
       configured: false,
       repoReady: false,
       running: false,
-      lastRun: { imported: 0, pushed: 0, archived: 0, deleted: 0, conflicts: [] },
+      lastRun: {
+        imported: 0, pushed: 0, archived: 0, deleted: 0, deletedUnpinned: 0,
+        pinned: 0, unpinned: 0, conflicts: [],
+      },
     })
 
     // Let the startup timer fire once: an unconfigured plugin takes no action.
@@ -182,9 +229,15 @@ describe('SessionSyncService', () => {
 
     expect(service.status().configured).toBe(true)
     expect(service.status().repoReady).toBe(true)
-    expect(service.status().lastRun).toEqual({ imported: 0, pushed: 0, archived: 0, deleted: 0, conflicts: [] })
+    expect(service.status().lastRun).toEqual({
+      imported: 0, pushed: 0, archived: 0, deleted: 0, deletedUnpinned: 0,
+      pinned: 0, unpinned: 0, conflicts: [],
+    })
     expect(completed).toHaveLength(1)
-    expect(completed[0]).toMatchObject({ imported: 0, pushed: 0, archived: 0, deleted: 0, conflicts: [] })
+    expect(completed[0]).toMatchObject({
+      imported: 0, pushed: 0, archived: 0, deleted: 0, deletedUnpinned: 0,
+      pinned: 0, unpinned: 0, conflicts: [],
+    })
 
     // The cycle log records the start and the successful outcome.
     const entries = await service.logs()
@@ -342,6 +395,9 @@ describe('SessionSyncService', () => {
     await mkdir(project, { recursive: true })
 
     const coldSnapshot = vi.fn((_meta: unknown, _inheritedEventCount: unknown, _events: unknown) => undefined)
+    // Only pinned sessions sync, so the selection the next cycle reads must
+    // already be on the remote.
+    await seedRemote(bare, [pinListFile(['session-a'])])
     const { service } = await compose({
       settings: {
         enabled: true,
@@ -353,6 +409,7 @@ describe('SessionSyncService', () => {
       delayMs: 20,
       dshHome: root,
       projectionCache: { coldSnapshot },
+      workspaces: fakeWorkspaceRegistry(['session-a']),
     })
 
     const artifact = sessionArtifact()
@@ -404,6 +461,12 @@ describe('SessionSyncService', () => {
     const project = join(root, 'project')
     await mkdir(project, { recursive: true })
 
+    // The artifact and the selection that admits it both live on the remote:
+    // the next cycle resets its worktree to that state before importing.
+    await seedRemote(bare, [
+      pinListFile(['session-a']),
+      { path: 'projects/demo/session-a.jsonl', content: sessionArtifact() },
+    ])
     const { ctx, service } = await compose({
       settings: {
         enabled: true,
@@ -414,12 +477,8 @@ describe('SessionSyncService', () => {
       },
       delayMs: 20,
       dshHome: root,
+      workspaces: fakeWorkspaceRegistry(['session-a']),
     })
-
-    const artifact = sessionArtifact()
-    const repoArtifact = join(root, 'session-sync', 'repo', 'projects', 'demo', 'session-a.jsonl')
-    await mkdir(join(root, 'session-sync', 'repo', 'projects', 'demo'), { recursive: true })
-    await writeFile(repoArtifact, artifact)
 
     await waitFor(() => service.status().lastSyncAt !== undefined, 'import cycle')
 
@@ -479,6 +538,12 @@ describe('SessionSyncService', () => {
     const project = join(root, 'project')
     await mkdir(project, { recursive: true })
 
+    // Both the artifact and its selection live on the remote so the startup
+    // cycle imports it (the cycle resets to the remote state first).
+    await seedRemote(bare, [
+      pinListFile(['session-a']),
+      { path: 'projects/demo/session-a.jsonl', content: sessionArtifact() },
+    ])
     const first = await compose({
       settings: {
         enabled: true,
@@ -489,12 +554,8 @@ describe('SessionSyncService', () => {
       },
       delayMs: 20,
       dshHome: root,
+      workspaces: fakeWorkspaceRegistry(['session-a']),
     })
-
-    const artifact = sessionArtifact()
-    const repoArtifact = join(root, 'session-sync', 'repo', 'projects', 'demo', 'session-a.jsonl')
-    await mkdir(join(root, 'session-sync', 'repo', 'projects', 'demo'), { recursive: true })
-    await writeFile(repoArtifact, artifact)
 
     const marksFile = join(root, 'session-sync', 'switch-notices.json')
     await waitFor(() => {

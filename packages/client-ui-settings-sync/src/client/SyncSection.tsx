@@ -1,5 +1,6 @@
 /**
- * Session-sync settings section: the master switch, git remote, branch,
+ * Session-sync settings section: the pin-selection scope note, the master
+ * switch, git remote, branch,
  * cadence, the git-space cleanup controls (periodic history truncation plus
  * a manual run), the project-mapping list (key + a local-workspace picker),
  * and the manual sync action with the host status. Field edits commit through
@@ -282,6 +283,9 @@ export function SyncSection({
         <span>{t('enabled')}</span>
       </label>
 
+      {/* The scope is the plugin's central rule, so it sits with the switch. */}
+      <p className={css.hint}>{t('scopeHint')}</p>
+
       <div className={css.field}>
         <label className={css.label} htmlFor="sync-remote">{t('remote')}</label>
         <Input
@@ -439,6 +443,15 @@ export function SyncSection({
               )}
               {state.sync !== undefined && state.sync.lastRun.archived > 0 && (
                 <dd>{t('archived', { count: state.sync.lastRun.archived })}</dd>
+              )}
+              {state.sync !== undefined && state.sync.lastRun.deletedUnpinned > 0 && (
+                <dd>{t('deletedUnpinned', { count: state.sync.lastRun.deletedUnpinned })}</dd>
+              )}
+              {state.sync !== undefined && state.sync.lastRun.pinned > 0 && (
+                <dd>{t('pinned', { count: state.sync.lastRun.pinned })}</dd>
+              )}
+              {state.sync !== undefined && state.sync.lastRun.unpinned > 0 && (
+                <dd>{t('unpinned', { count: state.sync.lastRun.unpinned })}</dd>
               )}
               {state.sync !== undefined && state.sync.lastRun.deleted > 0 && (
                 <dd>{t('deleted', { count: state.sync.lastRun.deleted })}</dd>

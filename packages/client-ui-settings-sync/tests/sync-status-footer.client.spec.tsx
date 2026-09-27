@@ -20,7 +20,8 @@ const baseStatus = {
   configured: false,
   repoReady: false,
   running: false,
-  lastRun: { imported: 0, pushed: 0, archived: 0, conflicts: [] },
+  pinnedCount: 0,
+  lastRun: { imported: 0, pushed: 0, archived: 0, deleted: 0, deletedUnpinned: 0, pinned: 0, unpinned: 0, conflicts: [] },
 }
 
 interface FakeApi {
@@ -32,7 +33,13 @@ interface FakeApi {
   logs: ReturnType<typeof vi.fn>
 }
 
-function fakeApi(options: { configured?: boolean; running?: boolean; lastError?: string; lastSyncAt?: string } = {}): FakeApi {
+function fakeApi(options: {
+  configured?: boolean
+  running?: boolean
+  lastError?: string
+  lastSyncAt?: string
+  pinnedCount?: number
+} = {}): FakeApi {
   return {
     getSettings: vi.fn(() => Promise.resolve({
       writable: true,
@@ -43,6 +50,7 @@ function fakeApi(options: { configured?: boolean; running?: boolean; lastError?:
       ...baseStatus,
       configured: options.configured ?? false,
       running: options.running ?? false,
+      pinnedCount: options.pinnedCount ?? 0,
       ...options.lastError === undefined ? {} : { lastError: options.lastError },
       ...options.lastSyncAt === undefined ? {} : { lastSyncAt: options.lastSyncAt },
     })),
@@ -99,6 +107,10 @@ describe('SyncStatusFooter', () => {
   })
 
   it('shows an unparsable last-sync instant verbatim', async () => {
+    await mount({ api: fakeApi({ configured: true, pinnedCount: 3, lastSyncAt: '2026-08-16T08:30:00.000Z' }) })
+    // The selection size is what actually syncs, so the footer names it.
+    expect(screen.getByText(new RegExp(t('pinnedCount', { count: 3 }).slice(0, 4)), { exact: false })).toBeTruthy()
+
     await mount({ api: fakeApi({ configured: true, lastSyncAt: 'garbage' }) })
     expect(screen.getByText(new RegExp('garbage'), { exact: false })).toBeTruthy()
   })

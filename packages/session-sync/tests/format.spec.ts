@@ -3,9 +3,11 @@ import { SESSION_FORMAT_VERSION, SessionId, SessionLogOffset } from '@deepseek-a
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import {
   archiveRepoPath, conflictRepoPath, decodeArtifact, encodeArtifact,
-  parseArchiveList, parsePortableSession, serializeArchiveList,
-  serializeManifest, serializePortableSession, sessionIdFromFilename, sessionRepoPath,
+  parseArchiveList, parsePinList, parsePinSnapshot, parsePortableSession,
+  pinRepoPath, serializeArchiveList, serializeManifest, serializePinList,
+  serializePinSnapshot, serializePortableSession, sessionIdFromFilename, sessionRepoPath,
 } from '../src/format.ts'
+import type { PinList, PinSnapshot } from '../src/format.ts'
 
 function headerLine(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
@@ -207,6 +209,92 @@ describe('project archive lists', () => {
     expect(() => parseArchiveList('{ "version": 1 }')).toThrow(/sessionIds is not an array/)
     expect(() => parseArchiveList('{ "version": 1, "sessionIds": [42] }')).toThrow(/invalid session id 42/)
     expect(() => parseArchiveList('{ "version": 1, "sessionIds": ["../evil"] }')).toThrow(/invalid session id/)
+  })
+})
+
+describe('pin list', () => {
+  const list: PinList = {
+    sessionIds: [SessionId('session-b'), SessionId('session-a'), SessionId('session-a')],
+    host: 'machine-a',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  }
+
+  it('lives at the worktree root and round-trips as a sorted, deduplicated snapshot', () => {
+    expect(pinRepoPath()).toBe('pinned.json')
+    const text = serializePinList(list)
+    expect(text).toBe(JSON.stringify({
+      version: 1,
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      host: 'machine-a',
+      sessionIds: ['session-a', 'session-b'],
+    }) + '\n')
+    expect(parsePinList(text)).toEqual({
+      sessionIds: [SessionId('session-a'), SessionId('session-b')],
+      host: 'machine-a',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    })
+  })
+
+  it('rejects malformed lists instead of silently emptying the selection', () => {
+    expect(() => parsePinList('{broken')).toThrow(/not valid JSON/)
+    expect(() => parsePinList('[1]')).toThrow(/not a JSON object/)
+    expect(() => parsePinList('{ "version": 2, "host": "h", "updatedAt": "t", "sessionIds": [] }'))
+      .toThrow(/unsupported version 2/)
+    expect(() => parsePinList('{ "version": 1, "host": "h", "updatedAt": "t" }'))
+      .toThrow(/sessionIds is not an array/)
+    expect(() => parsePinList('{ "version": 1, "updatedAt": "t", "sessionIds": [] }'))
+      .toThrow(/host is not a string/)
+    expect(() => parsePinList('{ "version": 1, "host": "h", "sessionIds": [] }'))
+      .toThrow(/updatedAt is not a string/)
+    expect(() => parsePinList('{ "version": 1, "host": "h", "updatedAt": "t", "sessionIds": ["nope"] }'))
+      .toThrow(/invalid session id/)
+  })
+})
+
+describe('pin baseline snapshot', () => {
+  const snapshot: PinSnapshot = {
+    firstSeen: true,
+    sessionIds: [SessionId('session-b'), SessionId('session-a')],
+    ownedIds: [SessionId('session-a')],
+    host: 'machine-a',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  }
+
+  it('round-trips the applied selection and the pins this machine owns', () => {
+    const text = serializePinSnapshot(snapshot)
+    expect(text).toBe(JSON.stringify({
+      version: 1,
+      firstSeen: true,
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      host: 'machine-a',
+      sessionIds: ['session-a', 'session-b'],
+      ownedIds: ['session-a'],
+    }) + '\n')
+    expect(parsePinSnapshot(text)).toEqual({
+      firstSeen: true,
+      sessionIds: [SessionId('session-a'), SessionId('session-b')],
+      ownedIds: [SessionId('session-a')],
+      host: 'machine-a',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    })
+  })
+
+  it('rejects a malformed baseline instead of guessing which side won', () => {
+    expect(() => parsePinSnapshot('{broken')).toThrow(/not valid JSON/)
+    expect(() => parsePinSnapshot('{ "version": 1 }')).toThrow(/firstSeen is not a boolean/)
+    expect(() => parsePinSnapshot('{ "version": 1, "firstSeen": true }')).toThrow(/sessionIds is not an array/)
+    expect(() => parsePinSnapshot('{ "version": 1, "firstSeen": true, "sessionIds": [] }'))
+      .toThrow(/ownedIds is not an array/)
+    expect(() => parsePinSnapshot('{ "version": 1, "firstSeen": true, "sessionIds": [], "ownedIds": [] }'))
+      .toThrow(/host is not a string/)
+    expect(() => parsePinSnapshot('{ "version": 1, "firstSeen": true, "sessionIds": [], "ownedIds": [], "host": "h" }'))
+      .toThrow(/updatedAt is not a string/)
+    expect(() => parsePinSnapshot(
+      '{ "version": 1, "firstSeen": true, "sessionIds": ["../evil"], "ownedIds": [], "host": "h", "updatedAt": "t" }',
+    )).toThrow(/invalid session id/)
+    expect(() => parsePinSnapshot(
+      '{ "version": 1, "firstSeen": true, "sessionIds": [], "ownedIds": ["../evil"], "host": "h", "updatedAt": "t" }',
+    )).toThrow(/invalid owned id/)
   })
 })
 

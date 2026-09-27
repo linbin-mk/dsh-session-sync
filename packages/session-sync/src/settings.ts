@@ -35,6 +35,16 @@ export const DEFAULT_CLEANUP_KEEP_COMMITS = 200
 /** Default delay between startup and the first automatic cycle (lets cold loads settle). */
 export const DEFAULT_STARTUP_SYNC_DELAY_MS = 3_000
 
+/**
+ * Cadence of the pin watchdog, in milliseconds. The user's pin action writes
+ * the harness registry directly and the plugin has no notification seam for
+ * it, so this timer is the trigger: it compares the local pin set with the
+ * last synced baseline and starts a cycle when they diverge. It doubles as
+ * the minimum spacing between two watchdog-launched cycles, so a run of pin
+ * clicks costs one cycle per interval rather than one per click.
+ */
+export const DEFAULT_WATCHDOG_INTERVAL_MS = 30_000
+
 /** One project relationship: the portable key used in the git repo and the machine-local directory. */
 export interface SessionSyncMapping {
   /** Portable project identity inside the git repo (`projects/<key>/...`). */

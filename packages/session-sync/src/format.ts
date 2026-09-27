@@ -10,10 +10,17 @@
  * Layout:
  * ```text
  * manifest.json                    { "version": 1, "projects": ["demo", ...] }
+ * pinned.json                      { "version": 1, "updatedAt", "host", "sessionIds": [...] }
  * projects/<key>/session-<id>.jsonl
  * projects/<key>/archived.json     { "version": 1, "sessionIds": ["session-...", ...] }
  * conflicts/<key>/<stem>-<host>.jsonl
  * ```
+ *
+ * `pinned.json` is the synchronization selection: pinned sessions are the only
+ * ones an artifact is written for, on any machine, and it is also the pin set
+ * every machine mirrors into its own registry. Every machine writes it as a
+ * whole snapshot rather than merging, because unpinning has to propagate and a
+ * union could never express a removal.
  *
  * An archived session is retired from git: the engine deletes its
  * `session-<id>.jsonl` (the local log is untouched) while its id stays in the
@@ -56,6 +63,47 @@ export const SYNC_ARCHIVE_VERSION = 1
 
 /** File name of one project's archived-session list inside its directory. */
 export const ARCHIVE_NAME = 'archived.json'
+
+/** Pin-list version this plugin writes and accepts. */
+export const SYNC_PIN_VERSION = 1
+
+/** File name of the repo pin list at the worktree root. */
+export const PIN_NAME = 'pinned.json'
+
+/** Snapshot version this plugin writes and accepts for its machine-local pin baseline. */
+export const SYNC_PIN_SNAPSHOT_VERSION = 1
+
+/**
+ * One machine's last synced pin state: the anchor that separates a local pin
+ * edit from a repo-side change. `firstSeen` records whether this machine ever
+ * completed a cycle — before that, an empty local pin set is a fresh machine,
+ * not a deliberate "unpin everything", so nothing may be published or swept.
+ * `ownedIds` records the pins this machine may drop from the repo's selection:
+ * an id it never owned is another machine's pin, which a local edit here must
+ * not remove.
+ */
+export interface PinSnapshot {
+  /** Whether this machine has completed at least one cycle. */
+  firstSeen: boolean
+  /** Session ids of the last synced pin state (repo order as read, sorted on write). */
+  sessionIds: SessionId[]
+  /** Session ids this machine may drop from the selection (sorted on write). */
+  ownedIds: SessionId[]
+  /** ISO-8601 instant this snapshot was written. */
+  updatedAt: string
+  /** Hostname that wrote it (diagnostics only). */
+  host: string
+}
+
+/** Decoded repo pin list: the authoritative cross-machine sync selection. */
+export interface PinList {
+  /** Session ids the repo currently selects for synchronization. */
+  sessionIds: SessionId[]
+  /** Hostname that published this revision (diagnostics only). */
+  host: string
+  /** ISO-8601 instant that machine published it (diagnostics only). */
+  updatedAt: string
+}
 
 /** Parsed portable artifact: the header plus its decoded event log. */
 export interface PortableSession {
@@ -291,6 +339,11 @@ export function archiveRepoPath(key: string): string {
   return `${PROJECTS_DIR}/${encodeRepoSegment(key)}/${ARCHIVE_NAME}`
 }
 
+/** Repo-relative path of the pin list, `pinned.json` at the worktree root. */
+export function pinRepoPath(): string {
+  return PIN_NAME
+}
+
 /**
  * Decode the session id from a repo artifact file name (`<id>.jsonl`, with
  * `id` carrying its own `session-` prefix).
@@ -350,6 +403,128 @@ export function parseArchiveList(text: string): SessionId[] {
 export function serializeArchiveList(ids: readonly SessionId[]): string {
   const unique = [...new Set(ids.map(String))].sort()
   return JSON.stringify({ version: SYNC_ARCHIVE_VERSION, sessionIds: unique }) + '\n'
+}
+
+/**
+ * Parse the repo pin list. It holds the cross-machine synchronization
+ * selection — the pinned sessions every machine mirrors and syncs — plus the
+ * publishing host and instant for diagnostics; malformed shapes reject
+ * instead of silently emptying the selection (an empty selection would stop
+ * every sync and sweep every artifact).
+ * @param text - raw pin-list artifact text.
+ * @returns the decoded pin list.
+ */
+export function parsePinList(text: string): PinList {  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new Error('pin list: not valid JSON')
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('pin list: not a JSON object')
+  }
+  const list = parsed as Partial<{ version: unknown; sessionIds: unknown; host: unknown; updatedAt: unknown }>
+  if (list.version !== SYNC_PIN_VERSION) {
+    throw new Error(`pin list: unsupported version ${String(list.version)}`)
+  }
+  if (!Array.isArray(list.sessionIds)) {
+    throw new Error('pin list: sessionIds is not an array')
+  }
+  if (typeof list.host !== 'string') {
+    throw new Error('pin list: host is not a string')
+  }
+  if (typeof list.updatedAt !== 'string') {
+    throw new Error('pin list: updatedAt is not a string')
+  }
+  const sessionIds: SessionId[] = []
+  for (const entry of list.sessionIds) {
+    if (typeof entry !== 'string' || !SESSION_ID_PATTERN.test(entry)) {
+      throw new Error(`pin list: invalid session id ${JSON.stringify(entry)}`)
+    }
+    sessionIds.push(SessionId(entry))
+  }
+  return { sessionIds, host: list.host, updatedAt: list.updatedAt }
+}
+
+/** Serialize the repo pin list canonically: sorted, deduplicated, versioned, attributed. */
+export function serializePinList(pinned: PinList): string {
+  const unique = [...new Set(pinned.sessionIds.map(String))].sort()
+  return JSON.stringify({
+    version: SYNC_PIN_VERSION,
+    updatedAt: pinned.updatedAt,
+    host: pinned.host,
+    sessionIds: unique,
+  }) + '\n'
+}
+
+/**
+ * Parse this machine's pin baseline. Unlike the repo artifacts this file is
+ * machine-local recovery state, not shared data: a missing file is the
+ * ordinary fresh state (handled by the caller), but an unreadable one is a
+ * real fault, because guessing it would decide between publishing this
+ * machine's pins and adopting the repo's.
+ * @param text - raw snapshot text.
+ * @returns the decoded snapshot.
+ */
+export function parsePinSnapshot(text: string): PinSnapshot {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new Error('pin snapshot: not valid JSON')
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('pin snapshot: not a JSON object')
+  }
+  const snapshot = parsed as Partial<{
+    version: unknown; firstSeen: unknown; sessionIds: unknown; ownedIds: unknown
+    host: unknown; updatedAt: unknown
+  }>
+  if (snapshot.version !== SYNC_PIN_SNAPSHOT_VERSION) {
+    throw new Error(`pin snapshot: unsupported version ${String(snapshot.version)}`)
+  }
+  if (typeof snapshot.firstSeen !== 'boolean') {
+    throw new Error('pin snapshot: firstSeen is not a boolean')
+  }
+  if (!Array.isArray(snapshot.sessionIds)) {
+    throw new Error('pin snapshot: sessionIds is not an array')
+  }
+  if (!Array.isArray(snapshot.ownedIds)) {
+    throw new Error('pin snapshot: ownedIds is not an array')
+  }
+  if (typeof snapshot.host !== 'string') {
+    throw new Error('pin snapshot: host is not a string')
+  }
+  if (typeof snapshot.updatedAt !== 'string') {
+    throw new Error('pin snapshot: updatedAt is not a string')
+  }
+  const ids = (value: unknown[], label: string): SessionId[] =>
+    value.map(entry => {
+      if (typeof entry !== 'string' || !SESSION_ID_PATTERN.test(entry)) {
+        throw new Error(`pin snapshot: invalid ${label} id ${JSON.stringify(entry)}`)
+      }
+      return SessionId(entry)
+    })
+  return {
+    firstSeen: snapshot.firstSeen,
+    sessionIds: ids(snapshot.sessionIds, 'session'),
+    ownedIds: ids(snapshot.ownedIds, 'owned'),
+    host: snapshot.host,
+    updatedAt: snapshot.updatedAt,
+  }
+}
+
+/** Serialize the machine-local pin baseline canonically: sorted, deduplicated, versioned. */
+export function serializePinSnapshot(snapshot: PinSnapshot): string {
+  const unique = (values: readonly SessionId[]): string[] => [...new Set(values.map(String))].sort()
+  return JSON.stringify({
+    version: SYNC_PIN_SNAPSHOT_VERSION,
+    firstSeen: snapshot.firstSeen,
+    updatedAt: snapshot.updatedAt,
+    host: snapshot.host,
+    sessionIds: unique(snapshot.sessionIds),
+    ownedIds: unique(snapshot.ownedIds),
+  }) + '\n'
 }
 
 /**

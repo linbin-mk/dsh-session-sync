@@ -30,6 +30,12 @@ export interface SyncLogEntry {
   archived?: number
   /** Archived repo artifacts the completed cycle deleted (success). */
   deleted?: number
+  /** Repo artifacts the completed cycle retired because the pin selection dropped them (success). */
+  deletedUnpinned?: number
+  /** Sessions the completed cycle pinned to mirror the repo's selection (success). */
+  pinned?: number
+  /** Sessions the completed cycle unpinned because the repo's selection dropped them (success). */
+  unpinned?: number
   /** Commits the git-space cleanup dropped right after the cycle (success). */
   cleanupDropped?: number
   /** Conflict-copy paths the completed cycle wrote (success). */

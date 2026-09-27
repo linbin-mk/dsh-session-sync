@@ -46,6 +46,7 @@
 import { Service } from '@deepseek-ai/cordis'
 import type { Context, Fiber } from '@deepseek-ai/cordis'
 import type { PreStepDecision } from '@deepseek-ai/dsh-agent'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import z from '@deepseek-ai/schemastery'
 import { mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises'
 import { hostname } from 'node:os'
@@ -63,11 +64,14 @@ import type {} from '@deepseek-ai/dsh-workspace'
 import type {} from '@deepseek-ai/dsh-session-projection-cache'
 import { runSyncCycle } from './engine.ts'
 import type { SyncEngineDeps, SyncFilesystem, SyncPersistence, SyncProjectionCache, SyncWorkspaceRegistry } from './engine.ts'
+import { parsePinSnapshot, serializePinSnapshot } from './format.ts'
+import type { PinSnapshot } from './format.ts'
 import { GitRepository } from './git.ts'
 import { SyncLog } from './log.ts'
 import type { SyncLogEntry } from './log.ts'
 import {
-  Config, DEFAULT_STARTUP_SYNC_DELAY_MS, SESSION_SYNC_NAMESPACE, readSettings, validateSessionSyncSettings,
+  Config, DEFAULT_STARTUP_SYNC_DELAY_MS, DEFAULT_WATCHDOG_INTERVAL_MS, SESSION_SYNC_NAMESPACE,
+  readSettings, validateSessionSyncSettings,
 } from './settings.ts'
 import type { ConfigInput, SessionSyncSettings } from './settings.ts'
 import { withSwitchNotice } from './switch-notice.ts'
@@ -76,14 +80,15 @@ import type { SessionSyncWebServer } from './routes.ts'
 
 export {
   Config, DEFAULT_BRANCH, DEFAULT_CLEANUP_KEEP_COMMITS, DEFAULT_CLEANUP_PERIOD_HOURS,
-  DEFAULT_INTERVAL_MINUTES, DEFAULT_STARTUP_SYNC_DELAY_MS,
+  DEFAULT_INTERVAL_MINUTES, DEFAULT_STARTUP_SYNC_DELAY_MS, DEFAULT_WATCHDOG_INTERVAL_MS,
   SESSION_SYNC_NAMESPACE, readSettings, validateSessionSyncSettings,
 } from './settings.ts'
 export type { ConfigInput, SessionSyncCleanupSettings, SessionSyncMapping, SessionSyncSettings } from './settings.ts'
-export { compareLogs, runSyncCycle } from './engine.ts'
+export { compareLogs, decidePinSync, runSyncCycle } from './engine.ts'
 export type {
-  LogRelation, SyncEngineDeps, SyncFilesystem, SyncGit, SyncPersistence,
-  SyncProjectionCache, SyncRunResult, SyncWorkspace, SyncWorkspaceRegistry,
+  LogRelation, PinSelection, PinSyncInput, SyncEngineDeps, SyncFilesystem, SyncGit,
+  SyncPersistence, SyncPinBaseline, SyncProjectionCache, SyncRunResult, SyncWorkspace,
+  SyncWorkspaceRegistry,
 } from './engine.ts'
 export { DEFAULT_GIT_RETRY, GitError, GitRepository } from './git.ts'
 export type { GitRetryPolicy } from './git.ts'
@@ -109,6 +114,12 @@ export interface SessionSyncCompleted {
   archived: number
   /** Archived sessions' repo artifacts deleted by the completed cycle. */
   deleted: number
+  /** Repo artifacts the completed cycle retired because the pin selection dropped them. */
+  deletedUnpinned: number
+  /** Sessions the completed cycle pinned to mirror the selection. */
+  pinned: number
+  /** Sessions the completed cycle unpinned because the selection dropped them. */
+  unpinned: number
   /** Repo-relative conflict-copy paths written by the completed cycle. */
   conflicts: string[]
   /** ISO-8601 instant the cycle finished. */
@@ -167,11 +178,28 @@ export class SessionSyncService extends Service {
   private inflight: Promise<void> | undefined
   /** In-flight git-space cleanup pass; cycles skip their due check while one runs. */
   private cleanupInflight: Promise<number> | undefined
+  /**
+   * Watchdog that watches the one thing this plugin cannot be notified about:
+   * the user's own pin action writes the harness registry directly, so a pin
+   * edit publishes only once a cycle runs. The watchdog compares the local pin
+   * set with the last synced baseline every {@link DEFAULT_WATCHDOG_INTERVAL_MS}
+   * and starts a cycle when they diverge; a running cycle re-reads the pin set
+   * itself, so a tick during one is harmless.
+   */
+  private watchdog: ReturnType<typeof setInterval> | undefined
+  /** Epoch ms of the last watchdog-launched cycle (debounces a run of pin edits). */
+  private lastWatchdogLaunch = 0
+  /** Lazy one-time pin-baseline load (awaited before the watchdog decides). */
+  private baselineLoaded: Promise<PinSnapshot | undefined> | undefined
+  /** Serialized baseline persistence so concurrent writes cannot interleave. */
+  private baselineWrite: Promise<void> = Promise.resolve()
   private repoReady = false
   private lastSyncAt: string | undefined
   private lastError: string | undefined
   private lastErrorAt: string | undefined
-  private lastRun: import('./api.ts').SessionSyncStatusView['lastRun'] = { imported: 0, pushed: 0, archived: 0, deleted: 0, conflicts: [] }
+  private lastRun: import('./api.ts').SessionSyncStatusView['lastRun'] = {
+    imported: 0, pushed: 0, archived: 0, deleted: 0, deletedUnpinned: 0, pinned: 0, unpinned: 0, conflicts: [],
+  }
   /** Epoch ms of the last completed cleanup pass (drives the period check). */
   private lastCleanupAt: number | undefined
   /** Outcome of the last completed cleanup pass. */
@@ -253,9 +281,13 @@ export class SessionSyncService extends Service {
       this.reschedule(this.getSettings())
       const startup = setTimeout(() => {
         if (configuredSettings(this.getSettings())) this.launchIfIdle()
+        // The pin watchdog starts with the first cycle: before it, the baseline
+        // is a fresh machine's, and adopting it is the first cycle's own job.
+        this.armWatchdog()
       }, this.config.startupSyncDelayMs)
       return () => {
         clearInterval(this.timer)
+        clearInterval(this.watchdog)
         clearTimeout(startup)
       }
     }, 'sessionSync.lifecycle')
@@ -287,6 +319,7 @@ export class SessionSyncService extends Service {
       configured: configuredSettings(settings),
       repoReady: this.repoReady,
       running: this.inflight !== undefined,
+      pinnedCount: this.ctx.get('workspaceRegistry')?.pinnedSessionIds.length ?? 0,
       ...this.lastSyncAt !== undefined ? { lastSyncAt: this.lastSyncAt } : {},
       ...this.lastError !== undefined ? { lastError: this.lastError } : {},
       ...this.lastErrorAt !== undefined ? { lastErrorAt: this.lastErrorAt } : {},
@@ -348,6 +381,94 @@ export class SessionSyncService extends Service {
     this.timer = undefined
     if (!configuredSettings(settings)) return
     this.timer = setInterval(() => { this.launchIfIdle() }, settings.intervalMinutes * 60_000)
+  }
+
+  /** Arm the pin watchdog (idempotent; the timer keeps running while enabled). */
+  private armWatchdog(): void {
+    if (this.watchdog !== undefined) return
+    this.watchdog = setInterval(() => { void this.watchPins() }, DEFAULT_WATCHDOG_INTERVAL_MS)
+  }
+
+  /**
+   * One watchdog tick: when the local pin set no longer matches the last
+   * synced state, the user pinned or unpinned something, so start a cycle —
+   * that is the trigger this plugin has for the pin action. A tick while a
+   * cycle runs is dropped (the end of that cycle re-arms the check), edits
+   * arriving within {@link DEFAULT_WATCHDOG_INTERVAL_MS} of the previous
+   * launch wait for the next tick, and an unconfigured plugin stays idle
+   * while saying why.
+   */
+  private async watchPins(): Promise<void> {
+    if (this.inflight !== undefined) return
+    const settings = this.getSettings()
+    if (!configuredSettings(settings)) return
+    const registry = this.ctx.get('workspaceRegistry')
+    if (registry === undefined) return
+    const diverged = await this.pinsDiverged(registry.pinnedSessionIds.map(String))
+    if (diverged !== true) return
+    const now = Date.now()
+    if (now - this.lastWatchdogLaunch < DEFAULT_WATCHDOG_INTERVAL_MS) return
+    this.lastWatchdogLaunch = now
+    this.launchIfIdle()
+  }
+
+  /**
+   * Whether this machine's pin set differs from the last synced baseline.
+   * @param localIds - the registry's current pin set.
+   * @returns true when the user changed pins since the last cycle; false when
+   * they match; `undefined` when the baseline cannot be read, so the caller
+   * runs nothing on a guess.
+   */
+  private async pinsDiverged(localIds: readonly string[]): Promise<boolean | undefined> {
+    try {
+      const baseline = await this.pinBaseline()
+      if (baseline === undefined) return true // a machine with no baseline has everything to do
+      const known = new Set(baseline.sessionIds.map(String))
+      if (known.size !== new Set(localIds).size) return true
+      return localIds.some(id => !known.has(id))
+    } catch (error) {
+      /* v8 ignore next 2 -- only a real read fault reaches here; the next tick retries */
+      this.ctx.logger.warn(`session sync: pin watchdog skipped a tick: ${messageOf(error)}`)
+      return undefined
+    }
+  }
+
+  /** Path of the machine-local pin baseline under the harness home. */
+  private pinBaselinePath(): string {
+    return join(this.home, 'pins.json')
+  }
+
+  /** Load the pin baseline lazily; a missing file is the fresh-machine state. */
+  private pinBaseline(): Promise<PinSnapshot | undefined> {
+    if (this.baselineLoaded === undefined) this.baselineLoaded = this.loadPinBaseline()
+    return this.baselineLoaded
+  }
+
+  /** Read the pin baseline; a missing file is the ordinary fresh state (fail-soft). */
+  private async loadPinBaseline(): Promise<PinSnapshot | undefined> {
+    try {
+      return parsePinSnapshot(await readFile(this.pinBaselinePath(), 'utf8'))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      this.ctx.logger.warn(`session sync: failed to load the pin baseline: ${messageOf(error)}`)
+      return undefined
+    }
+  }
+
+  /** Persist the pin baseline, serializing concurrent writes (fail-soft). */
+  private writePinBaseline(snapshot: PinSnapshot): Promise<void> {
+    const path = this.pinBaselinePath()
+    const text = serializePinSnapshot(snapshot)
+    this.baselineWrite = this.baselineWrite.then(async () => {
+      try {
+        await mkdir(dirname(path), { recursive: true })
+        await writeFile(path, text, 'utf8')
+      } catch (error) {
+        /* v8 ignore next -- real filesystem faults warn and keep the baseline in memory */
+        this.ctx.logger.warn(`session sync: failed to persist the pin baseline: ${messageOf(error)}`)
+      }
+    })
+    return this.baselineWrite
   }
 
   /**
@@ -496,7 +617,10 @@ export class SessionSyncService extends Service {
       persistence: this.persistencePort(),
       ...workspacePort === undefined ? {} : { workspaces: workspacePort },
       ...projectionCachePort === undefined ? {} : { projectionCache: projectionCachePort },
-      fs: new RepoFilesystem(this.repoDir()),
+      fs: new RepoFilesystem(this.repoDir(), {
+        read: () => this.pinBaseline(),
+        write: snapshot => this.writePinBaseline(snapshot),
+      }),
       git: {
         ensure: () => repository.ensure(settings.remote, settings.branch),
         fetch: () => repository.fetch(settings.branch),
@@ -514,7 +638,19 @@ export class SessionSyncService extends Service {
       this.lastSyncAt = finishedAt
       this.lastError = undefined
       this.lastErrorAt = undefined
-      this.lastRun = { imported: result.imported, pushed: result.pushed, archived: result.archived, deleted: result.deleted, conflicts: result.conflicts }
+      this.lastRun = {
+        imported: result.imported,
+        pushed: result.pushed,
+        archived: result.archived,
+        deleted: result.deleted,
+        deletedUnpinned: result.deletedUnpinned,
+        pinned: result.pinned.length,
+        unpinned: result.unpinned.length,
+        conflicts: result.conflicts,
+      }
+      // The cycle wrote this machine's applied pin state; drop the cached
+      // baseline so the watchdog compares against what the cycle just stored.
+      this.baselineLoaded = undefined
       // The periodic cleanup rides on the successful cycle: the worktree is
       // clean and freshly pushed, so the rewrite starts from the remote state.
       const cleanupDropped = await this.cleanupIfDue(settings)
@@ -526,6 +662,9 @@ export class SessionSyncService extends Service {
         pushed: result.pushed,
         archived: result.archived,
         deleted: result.deleted,
+        deletedUnpinned: result.deletedUnpinned,
+        pinned: result.pinned.length,
+        unpinned: result.unpinned.length,
         conflicts: result.conflicts,
         ...result.errors.length > 0 ? { errors: result.errors } : {},
         ...cleanupDropped > 0 ? { cleanupDropped } : {},
@@ -539,6 +678,9 @@ export class SessionSyncService extends Service {
         pushed: result.pushed,
         archived: result.archived,
         deleted: result.deleted,
+        deletedUnpinned: result.deletedUnpinned,
+        pinned: result.pinned.length,
+        unpinned: result.unpinned.length,
         conflicts: result.conflicts,
         lastSyncAt: this.lastSyncAt,
       })
@@ -621,6 +763,11 @@ export class SessionSyncService extends Service {
       create: (path, title) => registry.create(path, title),
       archivedSessionIds: () => registry.archivedSessionIds,
       archiveSession: id => registry.archiveSession(id),
+      // The pin set is the sync selection; mirroring it is what makes a pin
+      // made on one machine select the session on every machine.
+      pinnedSessionIds: () => registry.pinnedSessionIds,
+      pinSession: id => registry.pinSession(id),
+      unpinSession: id => registry.unpinSession(id),
     }
   }
 
@@ -647,8 +794,19 @@ export class SessionSyncService extends Service {
 class RepoFilesystem implements SyncFilesystem {
   readonly hostname: string
 
-  /** @param root - absolute worktree directory. */
-  constructor(private readonly root: string) {
+  /**
+   * @param root - absolute worktree directory.
+   * @param baseline - machine-local pin-baseline store (outside the worktree,
+   * so it is never committed); the engine reads it to tell a local pin edit
+   * from a repo-side change and writes back what it applied.
+   */
+  constructor(
+    private readonly root: string,
+    private readonly baseline: {
+      read(): Promise<PinSnapshot | undefined>
+      write(snapshot: PinSnapshot): Promise<void>
+    },
+  ) {
     this.hostname = hostname()
   }
 
@@ -690,6 +848,20 @@ class RepoFilesystem implements SyncFilesystem {
 
   async listFiles(rel: string): Promise<string[]> {
     return this.listEntries(rel, false)
+  }
+
+  async readPinBaseline(): Promise<PinSnapshot | undefined> {
+    return this.baseline.read()
+  }
+
+  async writePinBaseline(snapshot: { firstSeen: boolean; sessionIds: readonly string[]; ownedIds: readonly string[] }): Promise<void> {
+    await this.baseline.write({
+      firstSeen: snapshot.firstSeen,
+      sessionIds: snapshot.sessionIds.map((raw: string) => SessionId(raw)),
+      ownedIds: snapshot.ownedIds.map((raw: string) => SessionId(raw)),
+      updatedAt: new Date().toISOString(),
+      host: this.hostname,
+    })
   }
 
   /** Directory or file names inside one repo-relative directory. */

@@ -62,6 +62,7 @@ function decodeStatusView(value: unknown): SessionSyncStatusView {
     configured: view['configured'] === true,
     repoReady: view['repoReady'] === true,
     running: view['running'] === true,
+    pinnedCount: typeof view['pinnedCount'] === 'number' ? view['pinnedCount'] : 0,
     ...typeof view['lastSyncAt'] === 'string' ? { lastSyncAt: view['lastSyncAt'] } : {},
     ...typeof view['lastError'] === 'string' ? { lastError: view['lastError'] } : {},
     ...typeof view['lastErrorAt'] === 'string' ? { lastErrorAt: view['lastErrorAt'] } : {},
@@ -70,6 +71,9 @@ function decodeStatusView(value: unknown): SessionSyncStatusView {
       pushed: typeof lastRunValue['pushed'] === 'number' ? lastRunValue['pushed'] : 0,
       archived: typeof lastRunValue['archived'] === 'number' ? lastRunValue['archived'] : 0,
       deleted: typeof lastRunValue['deleted'] === 'number' ? lastRunValue['deleted'] : 0,
+      deletedUnpinned: typeof lastRunValue['deletedUnpinned'] === 'number' ? lastRunValue['deletedUnpinned'] : 0,
+      pinned: typeof lastRunValue['pinned'] === 'number' ? lastRunValue['pinned'] : 0,
+      unpinned: typeof lastRunValue['unpinned'] === 'number' ? lastRunValue['unpinned'] : 0,
       conflicts: Array.isArray(lastRunValue['conflicts'])
         ? lastRunValue['conflicts'].filter((entry): entry is string => typeof entry === 'string')
         : [],

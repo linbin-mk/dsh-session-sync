@@ -10,7 +10,11 @@ const baseStatus = {
   configured: false,
   repoReady: false,
   running: false,
-  lastRun: { imported: 0, pushed: 0, archived: 0, deleted: 0, conflicts: [] },
+  pinnedCount: 0,
+  lastRun: {
+    imported: 0, pushed: 0, archived: 0, deleted: 0, deletedUnpinned: 0,
+    pinned: 0, unpinned: 0, conflicts: [],
+  },
 }
 
 const baseSettingsValue = {
@@ -358,7 +362,12 @@ describe('SyncSectionController.update', () => {
 describe('SyncSectionController.syncNow', () => {
   it('runs a cycle and accepts the answered status view', async () => {
     const api = fakeApi({
-      syncNowResult: { ...baseStatus, configured: true, lastSyncAt: '2026-08-16T00:00:00.000Z', lastRun: { imported: 2, pushed: 1, archived: 1, deleted: 1, conflicts: ['c'] } },
+      syncNowResult: {
+        ...baseStatus,
+        configured: true,
+        lastSyncAt: '2026-08-16T00:00:00.000Z',
+        lastRun: { imported: 2, pushed: 1, archived: 1, deleted: 1, deletedUnpinned: 1, pinned: 1, unpinned: 1, conflicts: ['c'] },
+      },
       logsValue: [{ time: '2026-08-29T08:00:00.000Z', kind: 'success' }],
     })
     const controller = bench(api, new FakeConfigForm<SyncSettingsDraft>())
@@ -368,7 +377,10 @@ describe('SyncSectionController.syncNow', () => {
     expect(controller.store.getSnapshot()).toMatchObject({
       syncing: false,
       syncError: null,
-      sync: { configured: true, lastRun: { imported: 2, pushed: 1, archived: 1, deleted: 1, conflicts: ['c'] } },
+      sync: {
+        configured: true,
+        lastRun: { imported: 2, pushed: 1, archived: 1, deleted: 1, deletedUnpinned: 1, pinned: 1, unpinned: 1, conflicts: ['c'] },
+      },
       logs: [{ time: '2026-08-29T08:00:00.000Z', kind: 'success' }],
     })
     // The manual cycle appended records: the log panel refreshed after it.

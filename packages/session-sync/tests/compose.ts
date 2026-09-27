@@ -46,6 +46,17 @@ export interface ComposeRow {
   config?: Record<string, unknown>
 }
 
+/** The structural slice of `workspaceRegistry` this plugin consumes. */
+export interface FakeWorkspaceRegistry {
+  resolveByPath(path: string): Promise<{ attachSession(id: unknown): Promise<void> } | undefined>
+  create(path: string, title?: string): Promise<{ attachSession(id: unknown): Promise<void> }>
+  readonly archivedSessionIds: readonly unknown[]
+  archiveSession(id: unknown): Promise<void>
+  readonly pinnedSessionIds: readonly unknown[]
+  pinSession(id: unknown): Promise<void>
+  unpinSession(id: unknown): Promise<void>
+}
+
 /** Options of {@link composeSessionSync}. */
 export interface ComposeOptions {
   /** Section fields the row is composed with (plus the startup delay). */
@@ -60,10 +71,49 @@ export interface ComposeOptions {
   persistence?: unknown
   /** Value provided as `sessionProjectionCache`, when the spec wants the warm-up path. */
   projectionCache?: { coldSnapshot(meta: unknown, inheritedEventCount: unknown, events: unknown): unknown }
+  /** Value provided as `workspaceRegistry`, when the spec wants pin selection and attach. */
+  workspaces?: FakeWorkspaceRegistry
   /** Value provided as `webServer`, when the spec wants the plugin's HTTP routes mounted. */
   webServer?: SessionSyncWebServer
   /** Reuse a harness home instead of creating one (restart specs). */
   home?: string
+}
+
+/**
+ * An in-memory workspace registry: attach accounting, a grow-only archive set,
+ * and the pin set that selects what synchronizes. A spec seeds `pinnedIds` with
+ * the sessions it expects to sync, exactly as a user's pin action would.
+ * @param pinnedIds - session ids the machine starts with pinned.
+ * @returns the registry double.
+ */
+export function fakeWorkspaceRegistry(pinnedIds: readonly string[] = []): FakeWorkspaceRegistry & {
+  readonly attached: Map<string, string[]>
+  readonly archivedIds: unknown[]
+  readonly pinnedIds: unknown[]
+} {
+  const pinned: unknown[] = [...pinnedIds]
+  const archived: unknown[] = []
+  const attached = new Map<string, string[]>()
+  const entity = (path: string) => ({
+    attachSession: async (id: unknown) => { attached.set(path, [...attached.get(path) ?? [], String(id)]) },
+  })
+  return {
+    attached,
+    archivedIds: archived,
+    pinnedIds: pinned,
+    resolveByPath: async (path: string) => (attached.has(path) ? entity(path) : undefined),
+    create: async (path: string) => { attached.set(path, []); return entity(path) },
+    archivedSessionIds: archived,
+    archiveSession: async (id: unknown) => { archived.push(id) },
+    pinnedSessionIds: pinned,
+    pinSession: async (id: unknown) => {
+      if (!pinned.some(candidate => String(candidate) === String(id))) pinned.unshift(id)
+    },
+    unpinSession: async (id: unknown) => {
+      const at = pinned.findIndex(candidate => String(candidate) === String(id))
+      if (at !== -1) pinned.splice(at, 1)
+    },
+  }
 }
 
 /** Layer a patch over an object the way a profile document edit composes it. */
@@ -127,6 +177,7 @@ export async function composeSessionSync(options: ComposeOptions = {}): Promise<
     child.provide('appReady', { onReady: (listener: () => void) => { listener(); return () => {} } })
     if (options.persistence !== undefined) child.provide('sessionPersistence', options.persistence as never)
     if (options.projectionCache !== undefined) child.provide('sessionProjectionCache', options.projectionCache as never)
+    if (options.workspaces !== undefined) child.provide('workspaceRegistry', options.workspaces as never)
     if (options.webServer !== undefined) child.provide('webServer', options.webServer)
     Object.assign(child.loader.builtins, {
       editor: ConfigEditor,

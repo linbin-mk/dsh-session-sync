@@ -154,6 +154,9 @@ describe('session-sync Loader composition', () => {
 
     await configureSync(machineA.context, bare, projA, 'demo')
     expect(machineA.context.sessionSync.getSettings().mappings).toEqual([{ key: 'demo', path: projA }])
+    // Only pinned sessions synchronize: the user pins the session on A, and
+    // that pin is what selects it for every machine from here on.
+    await machineA.context.workspaceRegistry.pinSession(SessionId('session-one'))
     const statusA = await machineA.context.sessionSync.syncNow()
     expect(statusA.configured).toBe(true)
     expect(statusA.lastError).toBeUndefined()
@@ -165,6 +168,9 @@ describe('session-sync Loader composition', () => {
     const artifact = await readFile(join(checkout, 'projects', 'demo', 'session-one.jsonl'), 'utf8')
     expect(artifact).toContain('"project":"demo"')
     expect(artifact).not.toContain(projA)
+    // The pin list is the selection, and machine B mirrors it.
+    const pinList = JSON.parse(await readFile(join(checkout, 'pinned.json'), 'utf8')) as { sessionIds: string[] }
+    expect(pinList.sessionIds).toEqual(['session-one'])
 
     // Machine B: same remote, different project path — pull imports the
     // session. The projection services are composed to prove the import
@@ -186,6 +192,9 @@ describe('session-sync Loader composition', () => {
     expect(statusB.lastError).toBeUndefined()
     expect(statusB.lastRun.imported).toBe(1)
 
+    // The repo's pin list pinned the session here too, which is what the
+    // sidebar shows and what future cycles keep selecting.
+    expect(machineB.context.workspaceRegistry.pinnedSessionIds).toEqual([SessionId('session-one')])
     const imported = await machineB.context.sessionPersistence.list()
     const importedSnapshot = imported.find(candidate => String(candidate.header.id) === 'session-one')
     expect(importedSnapshot?.header.cwd).toBe(projB)
