@@ -21,7 +21,11 @@ const baseStatus = {
   configured: false,
   repoReady: false,
   running: false,
-  lastRun: { imported: 0, pushed: 0, archived: 0, conflicts: [] },
+  pinnedCount: 0,
+  lastRun: {
+    imported: 0, pushed: 0, archived: 0, deleted: 0, deletedUnpinned: 0,
+    pinned: 0, unpinned: 0, conflicts: [],
+  },
 }
 
 interface WorkspaceSnapshot {
@@ -138,115 +142,136 @@ describe('SyncSection', () => {
     view.unmount()
   })
 
-  it('commits the master switch and text fields through the shared form', async () => {
+  it('holds every field edit in the draft and writes them as one patch on save', async () => {
     const { form } = await mount()
+    const save = () => screen.getByRole('button', { name: t('save') })
+
     fireEvent.click(screen.getByRole('checkbox', { name: t('enabled') }))
-    await waitFor(() => {
-      expect(writtenPatch(form)).toEqual({ enabled: true })
-    })
+    fireEvent.change(screen.getByLabelText(t('remote')), { target: { value: 'git@example.com:team/repo.git' } })
+    fireEvent.change(screen.getByLabelText(t('branch')), { target: { value: 'develop' } })
+    fireEvent.change(screen.getByLabelText(t('interval')), { target: { value: '10' } })
 
-    const remote = screen.getByLabelText(t('remote'))
-    fireEvent.change(remote, { target: { value: 'git@example.com:team/repo.git' } })
-    fireEvent.focusOut(remote)
-    await waitFor(() => {
-      expect(writtenPatch(form)).toEqual({ remote: 'git@example.com:team/repo.git' })
-    })
+    // Nothing reaches the host while the user is still editing.
+    expect(screen.getByText(t('unsavedChanges'))).toBeTruthy()
+    expect(form.writes).toHaveLength(0)
 
-    const branch = screen.getByLabelText(t('branch'))
-    fireEvent.change(branch, { target: { value: 'develop' } })
-    fireEvent.focusOut(branch)
+    fireEvent.click(save())
     await waitFor(() => {
-      expect(writtenPatch(form)).toEqual({ branch: 'develop' })
-    })
-
-    const interval = screen.getByLabelText(t('interval'))
-    fireEvent.change(interval, { target: { value: '10' } })
-    await waitFor(() => {
-      expect(writtenPatch(form)).toEqual({ intervalMinutes: 10 })
+      expect(writtenPatch(form)).toEqual({
+        enabled: true,
+        remote: 'git@example.com:team/repo.git',
+        branch: 'develop',
+        intervalMinutes: 10,
+      })
     })
   })
 
-  it('skips unchanged blur commits', async () => {
+  it('offers no save action until something actually changes, and Reset drops the edits', async () => {
     const { form } = await mount({
       settingsValue: {
         enabled: false, remote: 'git@example.com:team/repo.git', branch: 'main', intervalMinutes: 5, mappings: [],
       },
     })
-    const before = form.writes.length
-    const remote = screen.getByLabelText(t('remote'))
-    fireEvent.focusOut(remote)
-    const branch = screen.getByLabelText(t('branch'))
-    fireEvent.focusOut(branch)
-    await new Promise(resolve => setTimeout(resolve, 0))
-    expect(form.writes.length).toBe(before)
+    expect(screen.queryByRole('button', { name: t('save') })).toBeNull()
+
+    fireEvent.change(screen.getByLabelText(t('branch')), { target: { value: 'develop' } })
+    fireEvent.click(screen.getByRole('button', { name: t('reset') }))
+    expect((screen.getByLabelText(t('branch')) as HTMLInputElement).value).toBe('main')
+    expect(screen.queryByRole('button', { name: t('save') })).toBeNull()
+    expect(form.writes).toHaveLength(0)
   })
 
-  it('adds, edits, and removes mapping rows with title-defaulted keys', async () => {
-    const mounted = await mount({
+  it('adds a second project without a duplicate and writes both rows only on save', async () => {
+    const { form, controller } = await mount({
+      settingsValue: {
+        enabled: true,
+        remote: 'git@example.com:team/repo.git',
+        branch: 'main',
+        intervalMinutes: 5,
+        mappings: [{ key: 'UmamiForMK', path: '/work/demo' }],
+      },
       workspaces: [
         { workspaceId: 'w1', path: '/work/demo', title: 'demo' },
         { workspaceId: 'w2', path: '/work/server', title: 'server' },
       ],
     })
+
+    // The new row starts empty — this is the fix for "adding a project always
+    // collides with the first one".
     fireEvent.click(screen.getByRole('button', { name: t('addMapping') }))
+    expect(form.writes).toHaveLength(0)
+    const paths = screen.getAllByLabelText(t('mappingPath')) as HTMLSelectElement[]
+    expect(paths).toHaveLength(2)
+    expect(paths[1]!.value).toBe('')
+
+    // An incomplete row blocks the save and says which row it is.
+    fireEvent.click(screen.getByRole('button', { name: t('save') }))
+    expect(screen.getByText(t('errorMappingKeyBlank', { row: 2 }))).toBeTruthy()
+    expect(screen.getByText(t('errorMappingPathBlank', { row: 2 }))).toBeTruthy()
+    expect(form.writes).toHaveLength(0)
+
+    fireEvent.change(screen.getAllByLabelText(t('mappingKey'))[1]!, { target: { value: 'server' } })
+    fireEvent.change(paths[1]!, { target: { value: '/work/server' } })
+    fireEvent.click(screen.getByRole('button', { name: t('save') }))
     await waitFor(() => {
-      expect(writtenPatch(mounted.form)).toEqual({
-        mappings: [{ key: 'demo', path: '/work/demo' }],
+      expect(writtenPatch(form)).toEqual({
+        mappings: [{ key: 'UmamiForMK', path: '/work/demo' }, { key: 'server', path: '/work/server' }],
       })
     })
-    // The post-write reload lands before the edit, so the draft it publishes
-    // cannot clobber the typed key.
     await waitFor(() => {
-      expect(mounted.controller.store.getSnapshot().settings?.mappings).toEqual([{ key: 'demo', path: '/work/demo' }])
+      expect(controller.store.getSnapshot().settings?.mappings)
+        .toEqual([{ key: 'UmamiForMK', path: '/work/demo' }, { key: 'server', path: '/work/server' }])
+    })
+  })
+
+  it('refuses a duplicate path locally instead of letting the host reject the write', async () => {
+    const { form } = await mount({
+      settingsValue: {
+        enabled: true,
+        remote: 'git@example.com:team/repo.git',
+        branch: 'main',
+        intervalMinutes: 5,
+        mappings: [{ key: 'UmamiForMK', path: '/work/demo' }],
+      },
+      workspaces: [
+        { workspaceId: 'w1', path: '/work/demo', title: 'demo' },
+        { workspaceId: 'w2', path: '/work/server', title: 'server' },
+      ],
     })
 
-    const key = screen.getByLabelText(t('mappingKey'))
-    fireEvent.change(key, { target: { value: 'server' } })
-    fireEvent.focusOut(key)
-    await waitFor(() => {
-      expect(writtenPatch(mounted.form)).toEqual({
-        mappings: [{ key: 'server', path: '/work/demo' }],
-      })
-    })
-
-    const path = screen.getByLabelText(t('mappingPath'))
-    fireEvent.change(path, { target: { value: '/work/demo' } })
-    await waitFor(() => {
-      expect(writtenPatch(mounted.form)).toEqual({
-        mappings: [{ key: 'server', path: '/work/demo' }],
-      })
-    })
-
-    // A second row defaults to the workspace title again (no duplicate) and
-    // exercises the untouched-entry arm of the mapping rewrite.
     fireEvent.click(screen.getByRole('button', { name: t('addMapping') }))
-    await waitFor(() => {
-      expect(mounted.controller.store.getSnapshot().settings?.mappings)
-        .toEqual([{ key: 'server', path: '/work/demo' }, { key: 'demo', path: '/work/demo' }])
+    fireEvent.change(screen.getAllByLabelText(t('mappingKey'))[1]!, { target: { value: 'other' } })
+    // Same directory as row 1: exactly the mistake the old form sent to the host.
+    fireEvent.change((screen.getAllByLabelText(t('mappingPath')) as HTMLSelectElement[])[1]!, {
+      target: { value: '/work/demo' },
     })
-    const firstKey = screen.getAllByLabelText(t('mappingKey'))[0]!
-    fireEvent.change(firstKey, { target: { value: 'prod' } })
-    fireEvent.focusOut(firstKey)
-    await waitFor(() => {
-      expect(writtenPatch(mounted.form)).toEqual({
-        mappings: [{ key: 'prod', path: '/work/demo' }, { key: 'demo', path: '/work/demo' }],
-      })
-    })
+    fireEvent.click(screen.getByRole('button', { name: t('save') }))
 
-    // Editing the first path rewrites its row and leaves the second untouched.
-    const firstPath = screen.getAllByLabelText(t('mappingPath'))[0]!
-    fireEvent.change(firstPath, { target: { value: '/work/server' } })
-    await waitFor(() => {
-      expect(writtenPatch(mounted.form)).toEqual({
-        mappings: [{ key: 'prod', path: '/work/server' }, { key: 'demo', path: '/work/demo' }],
-      })
-    })
+    expect(screen.getByText(t('errorMappingPathDuplicate', { path: '/work/demo' }))).toBeTruthy()
+    // Save stays clickable so the message is reachable; it just writes nothing.
+    expect(screen.getByRole('button', { name: t('save') })).toHaveProperty('disabled', false)
+    expect(form.writes).toHaveLength(0)
+  })
 
-    fireEvent.click(screen.getAllByRole('button', { name: new RegExp(t('removeMapping', { key: 'prod' }).slice(0, 3)) })[0]!)
+  it('removes a row and saves the shortened list', async () => {
+    const { form } = await mount({
+      settingsValue: {
+        enabled: true,
+        remote: 'git@example.com:team/repo.git',
+        branch: 'main',
+        intervalMinutes: 5,
+        mappings: [{ key: 'demo', path: '/work/demo' }, { key: 'server', path: '/work/server' }],
+      },
+      workspaces: [
+        { workspaceId: 'w1', path: '/work/demo', title: 'demo' },
+        { workspaceId: 'w2', path: '/work/server', title: 'server' },
+      ],
+    })
+    fireEvent.click(screen.getByRole('button', { name: t('removeMapping', { key: 'demo' }) }))
+    expect(form.writes).toHaveLength(0)
+    fireEvent.click(screen.getByRole('button', { name: t('save') }))
     await waitFor(() => {
-      expect(writtenPatch(mounted.form)).toEqual({
-        mappings: [{ key: 'demo', path: '/work/demo' }],
-      })
+      expect(writtenPatch(form)).toEqual({ mappings: [{ key: 'server', path: '/work/server' }] })
     })
   })
 
@@ -267,38 +292,6 @@ describe('SyncSection', () => {
     expect(remove.textContent).toBe('')
     expect(remove.querySelector('svg')).toBeTruthy()
     expect(screen.queryByText(t('removeMapping', { key: 'demo' }))).toBeNull()
-  })
-
-  it('de-duplicates the title-defaulted key with a numeric suffix', async () => {
-    const { form } = await mount({
-      settingsValue: { enabled: true, remote: 'git@example.com:team/repo.git', branch: 'main', intervalMinutes: 5, mappings: [{ key: 'demo', path: '/work/demo' }] },
-      workspaces: [
-        { workspaceId: 'w1', path: '/work/demo', title: 'demo' },
-        { workspaceId: 'w2', path: '/work/server', title: 'server' },
-      ],
-    })
-    fireEvent.click(screen.getByRole('button', { name: t('addMapping') }))
-    await waitFor(() => {
-      expect(writtenPatch(form)).toEqual({
-        mappings: [{ key: 'demo', path: '/work/demo' }, { key: 'demo-2', path: '/work/demo' }],
-      })
-    })
-  })
-
-  it('skips occupied numeric suffixes when de-duplicating the default key', async () => {
-    const { form } = await mount({
-      settingsValue: { enabled: true, remote: 'git@example.com:team/repo.git', branch: 'main', intervalMinutes: 5, mappings: [{ key: 'demo', path: '/work/demo' }, { key: 'demo-2', path: '/work/server' }] },
-      workspaces: [
-        { workspaceId: 'w1', path: '/work/demo', title: 'demo' },
-        { workspaceId: 'w2', path: '/work/server', title: 'server' },
-      ],
-    })
-    fireEvent.click(screen.getByRole('button', { name: t('addMapping') }))
-    await waitFor(() => {
-      expect(writtenPatch(form)).toEqual({
-        mappings: [{ key: 'demo', path: '/work/demo' }, { key: 'demo-2', path: '/work/server' }, { key: 'demo-3', path: '/work/demo' }],
-      })
-    })
   })
 
   it('gates the sync button on configuration and runs the cycle', async () => {
@@ -391,6 +384,7 @@ describe('SyncSection', () => {
     })
     form.writeError = 'remote is required when the plugin is enabled'
     fireEvent.click(screen.getByRole('checkbox', { name: t('enabled') }))
+    fireEvent.click(screen.getByRole('button', { name: t('save') }))
     await waitFor(() => {
       expect(screen.getByText(t('writeFailed', { message: 'remote is required when the plugin is enabled' }))).toBeTruthy()
     })
@@ -411,34 +405,23 @@ describe('SyncSection', () => {
     expect(screen.getByText(t('unmapped'))).toBeTruthy()
   })
 
-  it('commits the cleanup switch, period, and kept-commit count through the shared form', async () => {
+  it('holds the cleanup controls in the draft and writes them on save', async () => {
     const mounted = await mount()
     const form = mounted.form
     fireEvent.click(screen.getByRole('checkbox', { name: t('cleanupEnabled') }))
-    await waitFor(() => {
-      expect(writtenPatch(form)).toEqual({ cleanup: { enabled: true, periodHours: 24, keepCommits: 200 } })
-    })
-    // The post-write reload lands before the next edit publishes the draft.
-    await waitFor(() => {
-      expect(mounted.controller.store.getSnapshot().settings?.cleanup)
-        .toEqual({ enabled: true, periodHours: 24, keepCommits: 200 })
-    })
+    fireEvent.change(screen.getByLabelText(t('cleanupPeriod')), { target: { value: '72' } })
+    fireEvent.change(screen.getByLabelText(t('cleanupKeep')), { target: { value: '50' } })
+    expect(form.writes).toHaveLength(0)
 
-    const period = screen.getByLabelText(t('cleanupPeriod'))
-    fireEvent.change(period, { target: { value: '72' } })
+    fireEvent.click(screen.getByRole('button', { name: t('save') }))
     await waitFor(() => {
-      expect(writtenPatch(form)).toEqual({ cleanup: { enabled: true, periodHours: 72, keepCommits: 200 } })
+      expect(writtenPatch(form)).toEqual({
+        cleanup: { enabled: true, periodHours: 72, keepCommits: 50 },
+      })
     })
     await waitFor(() => {
       expect(mounted.controller.store.getSnapshot().settings?.cleanup)
-        .toEqual({ enabled: true, periodHours: 72, keepCommits: 200 })
-    })
-
-    const keep = screen.getByLabelText(t('cleanupKeep'))
-    fireEvent.change(keep, { target: { value: '50' } })
-    fireEvent.focusOut(keep)
-    await waitFor(() => {
-      expect(writtenPatch(form)).toEqual({ cleanup: { enabled: true, periodHours: 72, keepCommits: 50 } })
+        .toEqual({ enabled: true, periodHours: 72, keepCommits: 50 })
     })
   })
 
@@ -451,12 +434,12 @@ describe('SyncSection', () => {
     })
     const keep = screen.getByLabelText(t('cleanupKeep'))
     fireEvent.change(keep, { target: { value: '' } }) // transient while typing
-    fireEvent.focusOut(keep)
     fireEvent.change(keep, { target: { value: '-3' } })
-    fireEvent.focusOut(keep)
-    await new Promise(resolve => setTimeout(resolve, 0))
-    expect(form.writes).toHaveLength(0)
+    // The unusable value never enters the draft, so there is nothing to save:
+    // the host keeps 200, no write is offered, and the field still shows 200.
     expect((keep as HTMLInputElement).value).toBe('200')
+    expect(screen.queryByRole('button', { name: t('save') })).toBeNull()
+    expect(form.writes).toHaveLength(0)
   })
 
   it('gates the cleanup button on configuration and runs the pass', async () => {

@@ -3,15 +3,19 @@
  * switch, git remote, branch,
  * cadence, the git-space cleanup controls (periodic history truncation plus
  * a manual run), the project-mapping list (key + a local-workspace picker),
- * and the manual sync action with the host status. Field edits commit through
- * the wire on change (text fields on blur); the host validates and the
- * reload serves the last good section, so the page never paints a value the
- * host refused. Copy arrives through the locale seat; workspace choices come
- * from the useWorkspaces standard hook.
+ * and the manual sync action with the host status. Edits stay in a draft: the
+ * Save button writes exactly the changed fields, Reset drops them, and the
+ * local validation mirrors the host's cross-field rules so a mistake is named
+ * beside its field. Nothing is committed merely because a field lost focus,
+ * and a new mapping row starts empty instead of duplicating the first row.
+ * Copy arrives through the locale seat; workspace choices come from the
+ * useWorkspaces standard hook.
  */
 
 import { useEffect, useState } from 'react'
-import { Button, IconTrashOutlineRegular, Input, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import {
+  Button, IconTrashOutlineRegular, Input, Tooltip,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 import type { HostObservable, PropsHooks, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: the global `useWorkspaces` standard-hook merge (ui-workspace).
 import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
@@ -20,6 +24,10 @@ import type { SyncSectionController, SyncSectionState, SyncSettingsDraft } from 
 import { CLEANUP_PERIOD_CHOICES, SYNC_INTERVAL_CHOICES } from './controller.ts'
 import type { SyncWorkspaceChoice } from './controller.ts'
 import type { en } from './locales.ts'
+import {
+  draftFromSettings, isDirty, settingsPatch, validateDraft,
+} from './settings-form.ts'
+import type { ValidationIssue } from './settings-form.ts'
 import css from './SyncSection.module.css'
 
 /** Injected dependencies of {@link SyncSection} (slot `inject`). */
@@ -50,20 +58,6 @@ function workspaceChoices(
     path: workspace.path,
     title: workspace.title,
   }))
-}
-
-/** Default key for a new mapping row: the workspace title, de-duplicated with a numeric suffix. */
-function nextDefaultKey(
-  existing: readonly { key: string }[],
-  title: string | undefined,
-): string {
-  /* v8 ignore next -- the add button disables while no workspace choice exists */
-  const base = title ?? ''
-  if (!existing.some(mapping => mapping.key === base)) return base
-  for (let suffix = 2; ; suffix += 1) {
-    const candidate = `${base}-${suffix}`
-    if (!existing.some(mapping => mapping.key === candidate)) return candidate
-  }
 }
 
 /** The interval options, always including the current non-standard value. */
@@ -129,11 +123,17 @@ export function SyncSection({
   }) => selection)
   const [draft, setDraft] = useState<SyncSettingsDraft | undefined>(undefined)
   const [writeError, setWriteError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  // Validation stays quiet until the first Save attempt: a brand-new page with
+  // an empty remote is not an error the user made.
+  const [validated, setValidated] = useState(false)
 
   useEffect(() => { void sectionController.load() }, [sectionController])
   useEffect(() => {
     if (state.settings === undefined) return
-    setDraft(state.settings)
+    // A committed write (or a pushed invalidation) re-seeds the draft, so the
+    // form always shows what the host actually holds.
+    setDraft(draftFromSettings(state.settings))
   }, [state.settings])
 
   if (draft === undefined || state.status !== 'ready') {
@@ -150,12 +150,48 @@ export function SyncSection({
   // Narrowed alias: TS does not carry the guard's narrowing into nested
   // handler functions, and the JSX reads the same snapshot below.
   const settingsDraft = draft
+  const saved = state.settings
+  const issues = validateDraft(settingsDraft, {
+    remoteRequired: t('errorRemoteRequired'),
+    branchBlank: t('errorBranchBlank'),
+    mappingKeyBlank: (row: number) => t('errorMappingKeyBlank', { row }),
+    mappingPathBlank: (row: number) => t('errorMappingPathBlank', { row }),
+    mappingKeyDuplicate: (key: string) => t('errorMappingKeyDuplicate', { key }),
+    mappingPathDuplicate: (path: string) => t('errorMappingPathDuplicate', { path }),
+    intervalInvalid: t('errorIntervalInvalid'),
+  })
+  const dirty = saved !== undefined && isDirty(settingsDraft, saved)
+  const issuesFor = (field: ValidationIssue['field']): ValidationIssue[] =>
+    issues.filter(issue => issue.field === field)
+  const readOnly = !state.writable
 
-  /** Commit one patch through the wire and surface a rejection. */
-  async function commit(patch: object): Promise<void> {
+  /** Persist the whole draft as one patch of exactly the changed fields. */
+  async function save(): Promise<void> {
+    setValidated(true)
+    if (saved === undefined) return
+    // A draft that fails local validation never reaches the host: the write
+    // would be refused anyway, and the messages now say which field to fix.
+    if (issues.length > 0) return
+    const patch = settingsPatch(settingsDraft, saved)
+    // Nothing changed is still a successful save: the user asked for the form
+    // to match the host, and it does.
+    if (patch === undefined) {
+      setWriteError(null)
+      return
+    }
     setWriteError(null)
+    setSaving(true)
     const failure = await sectionController.update(patch)
+    setSaving(false)
     if (failure !== undefined) setWriteError(failure)
+  }
+
+  /** Drop every uncommitted edit and show the host's section again. */
+  function reset(): void {
+    if (saved === undefined) return
+    setDraft(draftFromSettings(saved))
+    setValidated(false)
+    setWriteError(null)
   }
 
   const choices = workspaceChoices(workspaceState.items.map((workspace: {
@@ -167,62 +203,11 @@ export function SyncSection({
     path: workspace.path,
     title: workspace.title,
   })))
-  const readOnly = !state.writable
   const configured = settingsDraft.enabled && settingsDraft.remote.trim().length > 0
   const noWorkspaces = choices.length === 0
 
   function setEnabled(enabled: boolean): void {
     setDraft({ ...settingsDraft, enabled })
-    void commit({ enabled })
-  }
-
-  function setRemote(remote: string): void {
-    setDraft({ ...settingsDraft, remote })
-  }
-
-  function commitRemote(): void {
-    if (settingsDraft.remote === state.settings?.remote) return
-    void commit({ remote: settingsDraft.remote.trim() })
-  }
-
-  function setBranch(branch: string): void {
-    setDraft({ ...settingsDraft, branch })
-  }
-
-  function commitBranch(): void {
-    if (settingsDraft.branch === state.settings?.branch) return
-    void commit({ branch: settingsDraft.branch.trim() })
-  }
-
-  function setIntervalMinutes(intervalMinutes: number): void {
-    setDraft({ ...settingsDraft, intervalMinutes })
-    void commit({ intervalMinutes })
-  }
-
-  function setCleanupEnabled(enabled: boolean): void {
-    const cleanup = { ...settingsDraft.cleanup, enabled }
-    setDraft({ ...settingsDraft, cleanup })
-    void commit({ cleanup })
-  }
-
-  function setCleanupPeriod(periodHours: number): void {
-    const cleanup = { ...settingsDraft.cleanup, periodHours }
-    setDraft({ ...settingsDraft, cleanup })
-    void commit({ cleanup })
-  }
-
-  function setCleanupKeep(text: string): void {
-    const parsed = Number(text)
-    const keepCommits = Number.isFinite(parsed) && parsed >= 1
-      ? Math.floor(parsed)
-      : settingsDraft.cleanup.keepCommits
-    const cleanup = { ...settingsDraft.cleanup, keepCommits }
-    setDraft({ ...settingsDraft, cleanup })
-  }
-
-  function commitCleanupKeep(): void {
-    if (settingsDraft.cleanup.keepCommits === state.settings?.cleanup.keepCommits) return
-    void commit({ cleanup: settingsDraft.cleanup })
   }
 
   function setMappingKey(index: number, key: string): void {
@@ -230,33 +215,29 @@ export function SyncSection({
     setDraft({ ...settingsDraft, mappings })
   }
 
-  function commitMappingKey(index: number): void {
-    const mapping = settingsDraft.mappings[index]
-    /* v8 ignore next -- a mapping row blurs with its own valid index */
-    if (mapping === undefined || mapping.key.trim() === state.settings?.mappings[index]?.key) return
-    void commit({ mappings: settingsDraft.mappings.map(entry => ({ ...entry, key: entry.key.trim() })) })
-  }
-
   function setMappingPath(index: number, path: string): void {
     const mappings = settingsDraft.mappings.map((mapping, at) => (at === index ? { ...mapping, path } : mapping))
     setDraft({ ...settingsDraft, mappings })
-    void commit({ mappings })
   }
 
+  /**
+   * Append an empty mapping row. The row is a draft: it commits only when the
+   * user names its key, picks a directory, and saves — which is what makes
+   * adding a second project possible at all (the old form submitted the row
+   * immediately with the first row's path and the host refused the duplicate).
+   */
   function addMapping(): void {
-    /* v8 ignore next -- the add button disables while no workspace choice exists */
-    const mappings = [...settingsDraft.mappings, {
-      key: nextDefaultKey(settingsDraft.mappings, choices[0]?.title),
-      path: choices[0]?.path ?? '',
-    }]
-    setDraft({ ...settingsDraft, mappings })
-    void commit({ mappings })
+    setDraft({
+      ...settingsDraft,
+      mappings: [...settingsDraft.mappings, { key: '', path: '' }],
+    })
   }
 
   function removeMapping(index: number): void {
-    const mappings = settingsDraft.mappings.filter((_mapping, at) => at !== index)
-    setDraft({ ...settingsDraft, mappings })
-    void commit({ mappings })
+    setDraft({
+      ...settingsDraft,
+      mappings: settingsDraft.mappings.filter((_mapping, at) => at !== index),
+    })
   }
 
   async function runSync(): Promise<void> {
@@ -271,6 +252,26 @@ export function SyncSection({
     <div className={css.section}>
       <h2 className={css.title}>{t('title')}</h2>
       <p className={css.hint}>{t('intro')}</p>
+
+      {dirty && (
+        <div className={css.saveBar}>
+          <span className={css.saveBarText}>{t('unsavedChanges')}</span>
+          <div className={css.saveBarActions}>
+            <Button variant="outline" disabled={saving} onClick={reset}>{t('reset')}</Button>
+            {/* Deliberately not disabled by `issues`: the messages that
+                explain a blocked save only appear after a Save attempt, so a
+                disabled button would be a dead end with no way to learn what
+                is wrong. */}
+            <Button
+              variant="primary"
+              disabled={readOnly || saving}
+              onClick={() => { void save() }}
+            >
+              {saving ? t('saving') : t('save')}
+            </Button>
+          </div>
+        </div>
+      )}
 
       <label className={css.row}>
         <input
@@ -293,10 +294,12 @@ export function SyncSection({
           value={settingsDraft.remote}
           disabled={readOnly}
           placeholder="git@example.com:team/repo.git"
-          onChange={(event) => { setRemote(event.target.value) }}
-          onBlur={commitRemote}
+          onChange={(event) => { setDraft({ ...settingsDraft, remote: event.target.value }) }}
         />
         <p className={css.hint}>{t('remoteHint')}</p>
+        {validated && issuesFor('remote').map(issue => (
+          <p className={css.fieldError} key={issue.message}>{issue.message}</p>
+        ))}
       </div>
 
       <div className={css.field}>
@@ -305,9 +308,11 @@ export function SyncSection({
           id="sync-branch"
           value={settingsDraft.branch}
           disabled={readOnly}
-          onChange={(event) => { setBranch(event.target.value) }}
-          onBlur={commitBranch}
+          onChange={(event) => { setDraft({ ...settingsDraft, branch: event.target.value }) }}
         />
+        {validated && issuesFor('branch').map(issue => (
+          <p className={css.fieldError} key={issue.message}>{issue.message}</p>
+        ))}
       </div>
 
       <div className={css.field}>
@@ -317,7 +322,7 @@ export function SyncSection({
           className={css.select}
           value={settingsDraft.intervalMinutes}
           disabled={readOnly}
-          onChange={(event) => { setIntervalMinutes(Number(event.target.value)) }}
+          onChange={(event) => { setDraft({ ...settingsDraft, intervalMinutes: Number(event.target.value) }) }}
         >
           {intervalOptions(settingsDraft.intervalMinutes).map(minutes => (
             <option key={minutes} value={minutes}>{t('intervalUnit', { minutes })}</option>
@@ -332,7 +337,9 @@ export function SyncSection({
           className={css.checkbox}
           checked={settingsDraft.cleanup.enabled}
           disabled={readOnly}
-          onChange={(event) => { setCleanupEnabled(event.target.checked) }}
+          onChange={(event) => {
+            setDraft({ ...settingsDraft, cleanup: { ...settingsDraft.cleanup, enabled: event.target.checked } })
+          }}
         />
         <span>{t('cleanupEnabled')}</span>
       </label>
@@ -344,7 +351,9 @@ export function SyncSection({
           className={css.select}
           value={settingsDraft.cleanup.periodHours}
           disabled={readOnly}
-          onChange={(event) => { setCleanupPeriod(Number(event.target.value)) }}
+          onChange={(event) => {
+            setDraft({ ...settingsDraft, cleanup: { ...settingsDraft.cleanup, periodHours: Number(event.target.value) } })
+          }}
         >
           {cleanupPeriodOptions(settingsDraft.cleanup.periodHours).map(hours => (
             <option key={hours} value={hours}>{t('cleanupPeriodUnit', { hours })}</option>
@@ -361,8 +370,12 @@ export function SyncSection({
           step={1}
           value={settingsDraft.cleanup.keepCommits}
           disabled={readOnly}
-          onChange={(event) => { setCleanupKeep(event.target.value) }}
-          onBlur={commitCleanupKeep}
+          onChange={(event) => {
+            const parsed = Number(event.target.value)
+            if (!Number.isFinite(parsed) || parsed < 1) return
+            const cleanup = { ...settingsDraft.cleanup, keepCommits: Math.floor(parsed) }
+            setDraft({ ...settingsDraft, cleanup })
+          }}
         />
       </div>
       <div className={css.mappingActions}>
@@ -373,6 +386,9 @@ export function SyncSection({
 
       <h3 className={css.subtitle}>{t('mappings')}</h3>
       <p className={css.hint}>{t('mappingsHint')}</p>
+      {validated && issuesFor('mappings').map(issue => (
+        <p className={css.fieldError} key={issue.message}>{issue.message}</p>
+      ))}
       {settingsDraft.mappings.length === 0 && <p className={css.hint}>{t('unmapped')}</p>}
       {noWorkspaces && <p className={css.error}>{t('noWorkspaces')}</p>}
       {settingsDraft.mappings.map((mapping, index) => (
@@ -385,7 +401,6 @@ export function SyncSection({
               disabled={readOnly}
               placeholder={t('mappingKeyPlaceholder')}
               onChange={(event) => { setMappingKey(index, event.target.value) }}
-              onBlur={() => { commitMappingKey(index) }}
             />
           </div>
           <div className={css.field}>
@@ -397,7 +412,8 @@ export function SyncSection({
               disabled={readOnly || noWorkspaces}
               onChange={(event) => { setMappingPath(index, event.target.value) }}
             >
-              {!choices.some(choice => choice.path === mapping.path) && (
+              {mapping.path.length === 0 && <option value="">{t('mappingPathPlaceholder')}</option>}
+              {mapping.path.length > 0 && !choices.some(choice => choice.path === mapping.path) && (
                 <option value={mapping.path}>{mapping.path}</option>
               )}
               {choices.map(choice => (
@@ -484,6 +500,9 @@ export function SyncSection({
           : <p className={css.hint}>{t('notConfigured')}</p>}
         {state.syncError !== null && <p className={css.error}>{t('syncFailed', { message: state.syncError })}</p>}
         {writeError !== null && <p className={css.error}>{t('writeFailed', { message: writeError })}</p>}
+        {!dirty && writeError === null && state.writable && (
+          <p className={css.hint}>{t('savedState')}</p>
+        )}
         {readOnly && <p className={css.hint}>{t('readOnly')}</p>}
       </div>
 

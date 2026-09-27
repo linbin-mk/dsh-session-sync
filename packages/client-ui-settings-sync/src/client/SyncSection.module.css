@@ -207,3 +207,36 @@
   color: var(--dsw-alias-state-error-primary);
   word-break: break-all;
 }
+
+/* Draft-and-save furniture: the bar is the page's primary verb and stays
+ * beside the intro so it is visible without scrolling, and each invalid field
+ * carries its own message instead of one opaque write error at the bottom. */
+.saveBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.saveBarText {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.saveBarActions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.fieldError {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-state-error-primary);
+}
