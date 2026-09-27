@@ -297,6 +297,52 @@ describe('SessionSyncService', () => {
     }
   })
 
+  it('arms automatic syncing when the master switch is turned on in the settings page', async () => {
+    previousDshHome = process.env.DSH_HOME
+    vi.useFakeTimers()
+    try {
+      const root = await mkdtemp(join(tmpdir(), 'dsh-sync-service-enable-'))
+      roots.push(root)
+      const bare = join(root, 'remote.git')
+      await execFileAsync('git', ['init', '--bare', '-b', 'main', bare])
+      const project = join(root, 'project')
+      await mkdir(project, { recursive: true })
+
+      // Composed with sync off: nothing is armed at mount, which is the state
+      // a user leaves the page in right after installing the plugin.
+      const completed: SessionSyncCompleted[] = []
+      const { ctx, service } = await compose({
+        settings: {
+          enabled: false,
+          remote: bare,
+          branch: 'main',
+          intervalMinutes: 1,
+          mappings: [{ key: 'demo', path: project }],
+        },
+        delayMs: 20,
+      })
+      ctx.on('session-sync/completed', (payload) => { completed.push(payload) })
+
+      await vi.advanceTimersByTimeAsync(50)
+      expect(completed).toHaveLength(0)
+
+      // The settings page writes the switch on; the very next interval tick
+      // must run a cycle — a plugin armed only at mount would stay idle until
+      // the harness restarted it.
+      const enabling = ctx.settings.update('session-sync', { enabled: true })
+      await vi.advanceTimersByTimeAsync(0)
+      await enabling
+      // The row's own initial commit is applied outside this write; give the
+      // armed timer one tick of headroom, then require the cycle.
+      await vi.advanceTimersByTimeAsync(60_000)
+      await service.syncNow()
+      expect(completed.length).toBeGreaterThan(0)
+      expect(service.status().lastError).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('runs a cycle through the logical persistence API', async () => {
     previousDshHome = process.env.DSH_HOME
     const root = await mkdtemp(join(tmpdir(), 'dsh-sync-service-noraw-'))

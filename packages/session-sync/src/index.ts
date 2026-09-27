@@ -231,6 +231,9 @@ export class SessionSyncService extends Service {
   /** Validate the resolved config, arm the timer plus startup pull, and serve the web API when a web server exists. */
   protected [Service.init](): void {
     const fiber = this.ctx.fiber
+    // Hook closures below outlive this call and must reach the activation
+    // helper without depending on `this`.
+    const service = this
     // A stored section the schema accepts but these rules reject fails the
     // plugin at load, the way the removed namespace registration did.
     validateSessionSyncSettings(this.getSettings())
@@ -260,16 +263,23 @@ export class SessionSyncService extends Service {
       return reviewed.decision
     })
     // The Loader commits a live edit into the Config references without
-    // remounting this plugin; the recomputed section re-arms the timer.
-    this.ctx.on('loader/volatile-update', () => { this.reschedule(this.getSettings()) })
+    // remounting this plugin; the recomputed section re-arms the timers.
+    this.ctx.on('loader/volatile-update', () => { this.activate(this.getSettings()) })
     // Every write path (the settings page, the profile document, the legacy
     // settings.yaml import) resolves the candidate config before persisting
     // it; the rules a schema cannot express are enforced here, so a refused
-    // write never reaches the profile document.
+    // write never reaches the profile document. Once the write is accepted the
+    // timers are re-armed from the committed section — that is what makes
+    // flipping the master switch in the settings page start automatic syncing
+    // without a restart.
     this.ctx.on('internal/config', function (this: Fiber, _raw: unknown, next: () => unknown): unknown {
       const candidate = next()
       if (this !== fiber) return candidate
-      validateSessionSyncSettings(readSettings(Config(candidate as never)))
+      // The hook runs while the volatile references still hold the old values,
+      // so the section this write produces is read from the candidate itself.
+      const resolved = readSettings(Config(candidate as never))
+      validateSessionSyncSettings(resolved)
+      service.activate(resolved)
       return candidate
     })
     this.ctx.effect(() => {
@@ -278,7 +288,7 @@ export class SessionSyncService extends Service {
         /* v8 ignore next -- real prune faults warn and leave the window to the next access */
         this.ctx.logger.warn(`session sync: log prune failed: ${messageOf(error)}`)
       })
-      this.reschedule(this.getSettings())
+      this.activate(this.getSettings())
       const startup = setTimeout(() => {
         if (configuredSettings(this.getSettings())) this.launchIfIdle()
         // The pin watchdog starts with the first cycle: before it, the baseline
@@ -373,6 +383,19 @@ export class SessionSyncService extends Service {
     if (this.inflight !== undefined) await this.inflight
     await this.runCleanupPass()
     return this.status()
+  }
+
+  /**
+   * Arm or disarm every automatic entry from one resolved section: the cycle
+   * timer follows the cadence, and the pin watchdog runs whenever automatic
+   * sync is on. A plugin whose composition starts disabled arms nothing, so
+   * this is also what a settings write calls — enabling the switch in the
+   * page has to start automatic syncing, not wait for a restart.
+   * @param settings - the resolved section to arm from.
+   */
+  private activate(settings: SessionSyncSettings): void {
+    this.reschedule(settings)
+    if (configuredSettings(settings)) this.armWatchdog()
   }
 
   /** Re-arm the automatic timer from the current settings. */
