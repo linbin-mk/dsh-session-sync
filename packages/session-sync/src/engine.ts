@@ -27,21 +27,26 @@
  * snapshot convergent without any oscillation:
  *
  * - **A local edit publishes; otherwise this machine adopts.** Each machine
- *   keeps a pin baseline (its last synced set plus the pins it owns, under the
- *   harness home). When the local pin set differs from that baseline the user
- *   changed it here, so this machine publishes its own set; when the local set
- *   still equals the baseline the repo changed elsewhere, so this machine
- *   adopts the repo's set. The publish keeps every pin the repo holds that
- *   this machine never tracked — another machine's pin for a project this one
- *   does not have must not fall to a local edit — while the ids it did own and
- *   just dropped are exactly what leaves the repo.
+ *   keeps a pin baseline (the pin set it actually applied last cycle plus the
+ *   pins it owns, under the harness home). When the local pin set differs from
+ *   that baseline the user changed it here, so this machine publishes its own
+ *   set; when the local set still equals the baseline the repo changed
+ *   elsewhere, so this machine adopts the repo's set. The publish keeps every
+ *   pin the repo holds that this machine never tracked — another machine's pin
+ *   for a project this one does not have must not fall to a local edit — while
+ *   the ids it did own and just dropped are exactly what leaves the repo. The
+ *   baseline records what was applied and only after the push: a pin this
+ *   machine could not mirror (no registry mounted yet, a refused pin) and a
+ *   selection the remote never accepted are not held state, so the next cycle
+ *   retries them instead of reading their absence as a local unpin.
  * - **Before its first completed cycle a machine only adopts.** An empty
  *   local pin set on a fresh machine is not a deliberate "unpin everything",
  *   so it publishes nothing and sweeps nothing: the repo's selection stays
  *   authoritative until this machine has actually seen it. A pin such a
  *   machine already holds is the exception — it is a real local edit made
  *   before the plugin ever ran, so it publishes (and the machine mirrors the
- *   repo's set as usual).
+ *   repo's set as usual). The same guard covers every later cycle that cannot
+ *   mirror the selection.
  *
  * Conflict policy: session logs are append-only event streams, so two
  * machines that both extended one session can diverge. When one log is a
@@ -180,6 +185,8 @@ export interface SyncFilesystem {
   writeRepoFile(rel: string, content: string): Promise<void>
   /** Delete a repo-relative file; resolves whether a file was actually removed. */
   deleteRepoFile(rel: string): Promise<boolean>
+  /** Delete a repo-relative directory; resolves whether a directory was actually removed. */
+  deleteRepoDir(rel: string): Promise<boolean>
   /** List directory names inside a repo-relative directory; empty when absent. */
   listDirs(rel: string): Promise<string[]>
   /** List file names inside a repo-relative directory; empty when absent. */
@@ -880,7 +887,8 @@ async function sweepRetiredArtifacts(
     }
     if (remaining === 0) {
       try {
-        await deps.fs.deleteRepoFile(`${PROJECTS_DIR}/${key}`)
+        // The directory, not a file: `unlink` cannot remove one.
+        await deps.fs.deleteRepoDir(`${PROJECTS_DIR}/${key}`)
       } catch (error) {
         result.errors.push(`${PROJECTS_DIR}/${key}: ${messageOf(error)}`)
         deps.logger.warn(`session sync: remove empty project ${key} failed: ${messageOf(error)}`)
@@ -1052,19 +1060,6 @@ export async function runSyncCycle(deps: SyncEngineDeps): Promise<SyncRunResult>
     )
   }
 
-  // The anchor for the next cycle: the selection this machine applied and the
-  // pins it now owns (so a later unpin reads as a local removal).
-  const baselineStale = baseline === undefined
-    || !sameIds(baseline.sessionIds, selection.publishedIds)
-    || !sameIds(baseline.ownedIds, selection.ownedIds)
-  if (baselineStale) {
-    await deps.fs.writePinBaseline({
-      firstSeen: true,
-      sessionIds: selection.publishedIds,
-      ownedIds: selection.ownedIds,
-    })
-  }
-
   // Manifest: the union of mapped keys and the project directories the repo
   // still holds — re-listed, because this cycle's sweeps may have removed one.
   const manifestKeys = [
@@ -1075,6 +1070,29 @@ export async function runSyncCycle(deps: SyncEngineDeps): Promise<SyncRunResult>
   await deps.git.addAll()
   await deps.git.commit('dsh session sync')
   await deps.git.push()
+
+  // The anchor for the next cycle: the pin set this machine actually holds
+  // after mirroring the selection, plus the pins it now owns (so a later unpin
+  // reads as a local removal). The applied set — never the intended publish —
+  // is what gets recorded: a cycle that could not mirror an adopted pin (no
+  // registry mounted yet, or a pin the host refused) must not record it as
+  // held, or the next cycle reads its absence as a local unpin and publishes
+  // that removal while sweeping the artifact the pin still selects. Writing
+  // only after the push keeps a selection the remote never accepted out of the
+  // anchor too, so the next cycle republishes it instead of adopting the
+  // missing pins as repo-side removals.
+  const appliedIds = registry === undefined ? [] : registry.pinnedSessionIds().map(String)
+  const baselineStale = baseline === undefined
+    || !sameIds(baseline.sessionIds, appliedIds)
+    || !sameIds(baseline.ownedIds, selection.ownedIds)
+  if (baselineStale) {
+    await deps.fs.writePinBaseline({
+      firstSeen: true,
+      sessionIds: appliedIds,
+      ownedIds: selection.ownedIds,
+    })
+  }
+
   result.conflicts = [...conflictPaths]
   return result
 }

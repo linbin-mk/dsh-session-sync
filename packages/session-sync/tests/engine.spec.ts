@@ -175,6 +175,10 @@ class FakeFilesystem implements SyncFilesystem {
   readonly hostname = 'test-host'
   readonly files = new Map<string, string>()
   readonly deleted: string[] = []
+  /** Directories removed by the empty-project sweep, in order. */
+  readonly deletedDirs: string[] = []
+  /** Directory entries the fixture has listed; they outlive their last file. */
+  private readonly dirs = new Set<string>()
   /** File names listFiles reports but readRepoFile answers undefined for. */
   phantom: string[] = []
   /** This machine's pin baseline; undefined is the fresh-machine state. */
@@ -225,6 +229,16 @@ class FakeFilesystem implements SyncFilesystem {
     return true
   }
 
+  async deleteRepoDir(rel: string): Promise<boolean> {
+    const prefix = `${rel}/`
+    for (const member of [...this.files.keys()].filter(key => key.startsWith(prefix))) this.files.delete(member)
+    // A directory survives its last file until something removes the entry
+    // itself, so only one this fixture has listed can be removed.
+    if (!this.dirs.delete(rel)) return false
+    this.deletedDirs.push(rel)
+    return true
+  }
+
   async listDirs(rel: string): Promise<string[]> {
     const prefix = rel === '' ? '' : `${rel}/`
     const names = [
@@ -235,7 +249,9 @@ class FakeFilesystem implements SyncFilesystem {
         .filter(name => name.startsWith(prefix))
         .map(name => name.slice(prefix.length).split('/')[0]!),
     ]
-    return [...new Set(names)].filter(name => !name.includes('.'))
+    const listed = [...new Set(names)].filter(name => !name.includes('.'))
+    for (const name of listed) this.dirs.add(rel === '' ? name : `${rel}/${name}`)
+    return listed
   }
 
   async listFiles(rel: string): Promise<string[]> {
@@ -941,6 +957,103 @@ describe('runSyncCycle pin selection', () => {
     expect(world.fs.baseline).toMatchObject({ firstSeen: true, sessionIds: ['session-a'] })
   })
 
+  it('anchors the baseline on the pins it applied, so a machine that could not mirror an adopted selection adopts it later instead of publishing an empty one', async () => {
+    const world = deps()
+    world.persistence.seed('session-a', '/work/demo', 2)
+    world.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 2))
+    selectRepo(world, ['session-a'])
+
+    // First cycle: the composition mounts no workspace registry, so the
+    // adopted pin has nowhere to land. The port is resolved per cycle, so a
+    // registry can still appear later — the anchor must record the pin set
+    // this machine actually applied, not the one it meant to publish.
+    const first = await runSyncCycle({ ...world.deps, workspaces: undefined })
+    expect(first.pinned).toEqual([])
+    expect(world.fs.baseline).toMatchObject({ firstSeen: true, sessionIds: [], ownedIds: ['session-a'] })
+
+    // Second cycle, registry mounted: the selection is adopted, and nothing
+    // publishes the empty set this machine was never able to hold.
+    const second = await runSyncCycle(world.deps)
+
+    expect(second.pinned).toEqual(['session-a'])
+    expect(world.workspaces.pinnedIds.map(String)).toEqual(['session-a'])
+    expect(second.publishedPins).toBeUndefined()
+    expect(second.deletedUnpinned).toBe(0)
+    expect(selectedAfter(world)).toEqual(['session-a'])
+    expect(world.fs.files.has('projects/demo/session-a.jsonl')).toBe(true)
+  })
+
+  it('does not anchor an adopted pin the registry refused', async () => {
+    const world = deps()
+    world.persistence.seed('session-a', '/work/demo', 2)
+    world.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 2))
+    selectRepo(world, ['session-a'])
+    world.workspaces.failPinOn = ['session-a']
+
+    const first = await runSyncCycle(world.deps)
+
+    expect(first.pinned).toEqual([])
+    expect(world.warnings).toContain('session sync: pin "session-a" failed: pin rejected')
+    expect(world.fs.baseline).toMatchObject({ firstSeen: true, sessionIds: [], ownedIds: ['session-a'] })
+
+    // The refusal was transient: the retry pins, publishes nothing, and still
+    // retires nothing — the anchor never claimed the pin was held.
+    world.workspaces.failPinOn = []
+    const second = await runSyncCycle(world.deps)
+
+    expect(second.pinned).toEqual(['session-a'])
+    expect(second.publishedPins).toBeUndefined()
+    expect(second.deletedUnpinned).toBe(0)
+    expect(selectedAfter(world)).toEqual(['session-a'])
+    expect(world.fs.files.has('projects/demo/session-a.jsonl')).toBe(true)
+  })
+
+  it('keeps a local unpin published on later cycles instead of selecting the session again', async () => {
+    const world = deps()
+    world.persistence.seed('session-a', '/work/demo', 2)
+    world.persistence.seed('session-b', '/work/demo', 2)
+    world.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 2))
+    world.fs.files.set('projects/demo/session-b.jsonl', artifactFor('session-b', 'demo', 2))
+    selectRepo(world, ['session-a', 'session-b'])
+    world.fs.baseline = baseline(['session-a', 'session-b'])
+    await world.workspaces.pinSession(SessionId('session-a'))
+    await world.workspaces.pinSession(SessionId('session-b'))
+    await world.workspaces.unpinSession(SessionId('session-b'))
+
+    const first = await runSyncCycle(world.deps)
+    expect(selectedAfter(world)).toEqual(['session-a'])
+    expect(first.deletedUnpinned).toBe(1)
+
+    // The next cycle must read the pin the user dropped as still dropped: a
+    // baseline anchored on the intended publish would make this machine look
+    // like it had just pinned session-b, publishing it back to the selection.
+    const second = await runSyncCycle(world.deps)
+
+    expect(selectedAfter(world)).toEqual(['session-a'])
+    expect(second.publishedPins).toBeUndefined()
+    expect(world.workspaces.pinnedIds.map(String)).toEqual(['session-a'])
+  })
+
+  it('removes a project directory once its last artifact is retired', async () => {
+    const world = deps()
+    world.persistence.seed('session-a', '/work/demo', 2)
+    world.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 2))
+    selectRepo(world, ['session-a'])
+    world.fs.baseline = baseline(['session-a'])
+    await world.workspaces.pinSession(SessionId('session-a'))
+    await world.workspaces.unpinSession(SessionId('session-a'))
+
+    const result = await runSyncCycle(world.deps)
+
+    expect(result.deletedUnpinned).toBe(1)
+    expect(result.errors).toEqual([])
+    expect(world.fs.files.has('projects/demo/session-a.jsonl')).toBe(false)
+    // The empty project leaves the repo through a directory removal: `unlink`
+    // cannot remove one, and the EPERM it answers with would land on the
+    // cycle as a spurious error.
+    expect(world.fs.deletedDirs).toEqual(['projects/demo'])
+  })
+
   it('publishes a local pin, writes its artifact, and selects it on the next cycle without republishing', async () => {
     const world = deps()
     world.persistence.seed('session-a', '/work/demo', 2)
@@ -958,6 +1071,33 @@ describe('runSyncCycle pin selection', () => {
     const second = await runSyncCycle(world.deps)
     expect(second.publishedPins).toBeUndefined()
     expect(world.fs.pinWrites.length).toBe(writesAfterFirst)
+  })
+
+  it('republishes a local pin whose cycle failed before the push', async () => {
+    const world = deps()
+    world.persistence.seed('session-a', '/work/demo', 2)
+    selectRepo(world, [])
+    world.fs.baseline = { firstSeen: true, ownedIds: [], sessionIds: [] }
+    await world.workspaces.pinSession(SessionId('session-a'))
+    world.git.failAt = 'push'
+
+    await expect(runSyncCycle(world.deps)).rejects.toThrow('git push failed')
+
+    // The remote never accepted the selection, so the anchor must not record it
+    // as applied: a machine that anchored the intended publish would read its
+    // own pin as held, adopt the remote's older set as a repo-side removal, and
+    // silently drop the pin locally.
+    expect(world.fs.baseline).toMatchObject({ firstSeen: true, sessionIds: [] })
+
+    // The next cycle starts from the remote state (`resetHard` discarded the
+    // unpublished write), where the pin still reads as a local edit.
+    world.git.failAt = undefined
+    world.fs.files.set(PIN_NAME, pinnedFile([]))
+    const second = await runSyncCycle(world.deps)
+
+    expect(second.publishedPins).toEqual(['session-a'])
+    expect(selectedAfter(world)).toEqual(['session-a'])
+    expect(world.workspaces.pinnedIds.map(String)).toEqual(['session-a'])
   })
 
   it('adopts a repo-side removal and refuses to retire what it still pins', async () => {
@@ -1150,7 +1290,10 @@ describe('runSyncCycle pin selection', () => {
     expect(result.imported).toBe(1)
     expect(result.pinned).toEqual([])
     expect(world.warnings.some(message => message.includes('pin "session-remote" failed'))).toBe(true)
-    expect(world.fs.baseline).toMatchObject({ sessionIds: ['session-remote'] })
+    // The refusal is not recorded as a held pin: the anchor carries what this
+    // machine applied, so the next cycle retries the pin instead of reading its
+    // absence as a local unpin and publishing the removal.
+    expect(world.fs.baseline).toMatchObject({ sessionIds: [], ownedIds: ['session-remote'] })
   })
 })
 

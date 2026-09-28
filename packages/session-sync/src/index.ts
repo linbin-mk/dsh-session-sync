@@ -48,7 +48,7 @@ import type { Context, Fiber } from '@deepseek-ai/cordis'
 import type { PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import z from '@deepseek-ai/schemastery'
-import { mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rmdir, unlink, writeFile } from 'node:fs/promises'
 import { hostname } from 'node:os'
 import { dirname, join } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
@@ -862,6 +862,19 @@ class RepoFilesystem implements SyncFilesystem {
       /* v8 ignore next 2 -- non-ENOENT failures surface only under real permission/IO faults */
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
       return false
+    }
+  }
+
+  async deleteRepoDir(rel: string): Promise<boolean> {
+    try {
+      await rmdir(this.abs(rel))
+      return true
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      // Gone already, or something landed in it since the sweep listed it:
+      // both mean the directory was not removed, which is not a failure.
+      if (code === 'ENOENT' || code === 'ENOTEMPTY' || code === 'EEXIST') return false
+      throw error
     }
   }
 

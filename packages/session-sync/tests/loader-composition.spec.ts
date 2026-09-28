@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import Storage from '@deepseek-ai/dsh-storage'
@@ -59,21 +59,28 @@ function isExtra(value: unknown): value is Extra {
   return typeof value === 'object' && value !== null && ('module' in value || 'config' in value)
 }
 
-async function compose(prefix: string, home: string, extras: Record<string, unknown> = {}): Promise<Machine> {
+async function compose(
+  prefix: string,
+  home: string,
+  extras: Record<string, unknown> = {},
+  options: { workspaces?: boolean } = {},
+): Promise<Machine> {
   const root = await mkdtemp(join(tmpdir(), prefix))
   roots.push(root)
   await mkdir(join(home, 'storages'), { recursive: true })
   await mkdir(join(home, 'sessions'), { recursive: true })
 
   // The storage/session services a real deployment mounts; the plugin's own
-  // `session-sync` row is added by the shared composition helper.
+  // `session-sync` row is added by the shared composition helper. A machine
+  // composed without the workspace registry models the deployments the plugin
+  // supports without one — the registry is optional.
   const rows: ComposeRow[] = [
     { id: 'storage', name: 'cordis:storage' },
     { id: 'storage-json', name: 'cordis:storage-json', config: { root: join(home, 'storages') } },
     { id: 'storage-domain', name: 'cordis:storage-domain', config: { backend: 'json' } },
     { id: 'sessions', name: 'cordis:sessions' },
     { id: 'session-persistence', name: 'cordis:session-persistence', config: { root: join(home, 'sessions') } },
-    { id: 'workspaces', name: 'cordis:workspaces' },
+    ...options.workspaces === false ? [] : [{ id: 'workspaces', name: 'cordis:workspaces' }],
   ]
   const builtins: Record<string, unknown> = {
     storage: Storage,
@@ -251,6 +258,123 @@ describe('session-sync Loader composition', () => {
     expect(machineC.context.workspaceRegistry.list()).toEqual([])
     // Three booted harness compositions and several real git cycles: the
     // per-test default is a load-dependent budget, not a deadlock detector.
+  }, 30_000)
+
+  it('adopts a shared selection it cannot mirror without emptying the repo selection or retiring the artifact', async () => {
+    previousDshHome = process.env.DSH_HOME
+    const setup = await mkdtemp(join(tmpdir(), 'dsh-sync-noregistry-'))
+    roots.push(setup)
+    const homeA = join(setup, 'homeA')
+    const homeB = join(setup, 'homeB')
+    const projA = join(setup, 'projects', 'demo-a')
+    const projB = join(setup, 'projects', 'demo-b')
+    await mkdir(projA, { recursive: true })
+    await mkdir(projB, { recursive: true })
+    const bare = join(setup, 'remote.git')
+    await execFileAsync('git', ['init', '--bare', '-b', 'main', bare])
+
+    // Machine A publishes one pinned session.
+    process.env.DSH_HOME = homeA
+    const machineA = await compose('dsh-sync-nr-a-', homeA)
+    const sessionA = machineA.context.sessions.create(SessionId('session-one'), { meta: { cwd: projA } })
+    const writerA = await machineA.context.sessionPersistence.create(sessionA.header, {
+      inheritedEventCount: sessionA.inheritedEventCount,
+    })
+    await writerA.append([
+      { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+      { type: 'turn/end', seq: 1, time: 2, data: { turn: 1, reason: { kind: 'completed' } } },
+    ] as SessionEvent[])
+    await writerA.flush()
+    await writerA.close()
+    await configureSync(machineA.context, bare, projA, 'demo')
+    await machineA.context.workspaceRegistry.pinSession(SessionId('session-one'))
+    const statusA = await machineA.context.sessionSync.syncNow()
+    expect(statusA.lastRun.pushed).toBe(1)
+
+    // Machine B mounts no workspace registry — the optional-service deployment
+    // shape, and the state a startup cycle can still be in before that row
+    // activates. Its cycles import the selection but can never mirror the pin;
+    // the anchor must therefore never record the pin as held, or the cycle
+    // after the import reads its absence as a local unpin, publishes the empty
+    // set, and retires the artifact the shared selection still names.
+    process.env.DSH_HOME = homeB
+    const machineB = await compose('dsh-sync-nr-b-', homeB, {}, { workspaces: false })
+    await configureSync(machineB.context, bare, projB, 'demo')
+    const firstB = await machineB.context.sessionSync.syncNow()
+    expect(firstB.lastError).toBeUndefined()
+    expect(firstB.lastRun.imported).toBe(1)
+
+    const secondB = await machineB.context.sessionSync.syncNow()
+    expect(secondB.lastError).toBeUndefined()
+
+    // The shared selection and its artifact are the repo's single source of
+    // truth: neither may change just because this machine cannot mirror a pin.
+    const checkout = join(setup, 'checkout')
+    await execFileAsync('git', ['clone', '-b', 'main', bare, checkout])
+    const pinList = JSON.parse(await readFile(join(checkout, 'pinned.json'), 'utf8')) as { sessionIds: string[] }
+    expect(pinList.sessionIds).toEqual(['session-one'])
+    const artifact = await readFile(join(checkout, 'projects', 'demo', 'session-one.jsonl'), 'utf8')
+    expect(artifact).toContain('"project":"demo"')
+    expect(secondB.lastRun.deletedUnpinned).toBe(0)
+    expect(secondB.lastRun.imported).toBe(0)
+    // The imported session stays stored on B either way: only the selection and
+    // its git artifact were ever at risk.
+    expect((await machineB.context.sessionPersistence.list()).map(candidate => String(candidate.header.id)))
+      .toEqual(['session-one'])
+    // Two booted compositions and several real git cycles: the per-test default
+    // is a load-dependent budget, not a deadlock detector.
+  }, 30_000)
+
+  it('removes an emptied project directory from the repo when its last pin is dropped', async () => {
+    previousDshHome = process.env.DSH_HOME
+    const setup = await mkdtemp(join(tmpdir(), 'dsh-sync-sweep-'))
+    roots.push(setup)
+    const home = join(setup, 'home')
+    const project = join(setup, 'projects', 'demo')
+    await mkdir(project, { recursive: true })
+    const bare = join(setup, 'remote.git')
+    await execFileAsync('git', ['init', '--bare', '-b', 'main', bare])
+
+    process.env.DSH_HOME = home
+    const machine = await compose('dsh-sync-sweep-', home)
+    const session = machine.context.sessions.create(SessionId('session-one'), { meta: { cwd: project } })
+    const writer = await machine.context.sessionPersistence.create(session.header, {
+      inheritedEventCount: session.inheritedEventCount,
+    })
+    await writer.append([
+      { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+      { type: 'turn/end', seq: 1, time: 2, data: { turn: 1, reason: { kind: 'completed' } } },
+    ] as SessionEvent[])
+    await writer.flush()
+    await writer.close()
+    await configureSync(machine.context, bare, project, 'demo')
+    await machine.context.workspaceRegistry.pinSession(SessionId('session-one'))
+    expect((await machine.context.sessionSync.syncNow()).lastRun.pushed).toBe(1)
+
+    await machine.context.workspaceRegistry.unpinSession(SessionId('session-one'))
+    const dropped = await machine.context.sessionSync.syncNow()
+
+    // The retired artifact leaves together with the directory that held it:
+    // the removal is a directory operation, so `unlink`'s EPERM cannot land on
+    // the cycle as an error, and the emptied project stops appearing at all.
+    expect(dropped.lastError).toBeUndefined()
+    expect(dropped.lastRun.deletedUnpinned).toBe(1)
+    const checkout = join(setup, 'checkout')
+    await execFileAsync('git', ['clone', '-b', 'main', bare, checkout])
+    await expect(access(join(checkout, 'projects', 'demo'))).rejects.toThrow()
+    // The cycle log is where a contained failure would show: removing the
+    // emptied directory with a file operation answers EPERM (`unlink` cannot
+    // remove a directory) and lands there beside an otherwise successful cycle.
+    const logDir = join(home, 'session-sync', 'logs')
+    const [logFile] = await readdir(logDir)
+    const records = (await readFile(join(logDir, logFile!), 'utf8'))
+      .trim().split('\n').map(line => JSON.parse(line) as { kind: string; errors?: string[] })
+    const succeeded = records.filter(record => record.kind === 'success')
+    expect(succeeded).toHaveLength(2)
+    for (const record of succeeded) expect(record.errors).toBeUndefined()
+    // The local session survives: only its repo artifact is retired.
+    expect((await machine.context.sessionPersistence.list()).map(candidate => String(candidate.header.id)))
+      .toEqual(['session-one'])
   }, 30_000)
 
   it('registers its HTTP routes on a mounted webServer and removes them on disposal', async () => {
