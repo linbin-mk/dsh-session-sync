@@ -59,9 +59,16 @@ The host package holds the sync engine (`engine.ts`, `format.ts`, `git.ts`, `set
 ## Requirements
 
 - Node.js `^22.19 || >=24`
-- DeepSeek Harness `0.1.7-alpha.1` (all `@deepseek-ai/*` dependencies use published npm versions; no local harness links)
+- DeepSeek Harness `0.1.7-rc.2` (all `@deepseek-ai/*` dependencies use published npm versions; no local harness links)
+- The peer line both packages declare: `@deepseek-ai/cordis ^4.0.4`, `@deepseek-ai/schemastery ^3.18.4`, `cordis-plugin-loader ^1.0.5`, `cordis-plugin-include ^1.0.9`
 - `git` on PATH and an SSH key for the sync remote (host key checking: `StrictHostKeyChecking=accept-new`)
 - pnpm, but only when building from source
+
+### 0.4.0: tracks DeepSeek Harness 0.1.7-rc.2
+
+- Every `@deepseek-ai/*` peer range moved from `0.1.7-alpha.1` to `0.1.7-rc.2`, together with the Cordis line the harness vendors (`@deepseek-ai/cordis ^4.0.4`, `@deepseek-ai/schemastery ^3.18.4`, `cordis-plugin-loader ^1.0.5`, `cordis-plugin-include ^1.0.9`). A profile still on `0.1.7-alpha.1` cannot install this version.
+- The logical session artifact format is unchanged (the harness Session format is still v4), so repositories written by 0.3.x keep working.
+- Archive marks stay a grow-only union even though `0.1.7-rc.2` added an unarchive path — see [Known limitations](#known-limitations).
 
 ### 0.3.0 breaking change: from full mirrors to pinned sessions only
 
@@ -184,7 +191,7 @@ Real-slot-core behavior is covered by the harness-side integration.
 - SSH remotes only; HTTPS + token remotes are not implemented.
 - Projection pre-warm is fail-soft: when a warm-up fails, the row falls back to the project name until the session is opened or a later import refreshes it.
 - Conflict copies need manual attention; the page shows only their count.
-- The harness archive set has no unarchive path yet, so archiving is one-way (grow-only union): once archived anywhere, a session stays hidden everywhere and its repo artifact is deleted — archived content cannot be recovered from the repository. When upstream adds unarchive, the archive list format will need tombstones.
+- The shared archive marks are a grow-only union: DeepSeek Harness `0.1.7-rc.2` added an unarchive path, but restoring a session locally is undone by the next cycle, because the repository's mark is unioned back into the local archive set. Propagating an unarchive needs a tombstone in the per-project `archived.json` (and a format version bump), which this release does not implement. Archived content stays unrecoverable from the repository either way: the session artifact is deleted when the mark lands.
 - Cleanup is a history rewrite: local and remote history commits are dropped (the newest tree is preserved). The hosting server's object-store GC — which decides when its own storage shrinks — is outside the client's control; when two machines clean up at nearly the same time, `--force-with-lease` rejects the later push and the next cycle retries, so a newer commit is never silently clobbered.
 - If the harness upstream ever merges session sync into the core RPC surface, an RPC-native variant could replace the HTTP API without changing the engine.
 

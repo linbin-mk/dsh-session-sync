@@ -18,6 +18,8 @@ host 半边见 [`@linbin-mk/dsh-session-sync`](https://www.npmjs.com/package/@li
   name: '@linbin-mk/dsh-client-ui-settings-sync'
 ```
 
+要求 DeepSeek Harness `0.1.7-rc.2`（`@deepseek-ai/cordis ^4.0.4`），并 peer 依赖 Host 半边 `@linbin-mk/dsh-session-sync ^0.4.0`。
+
 ## 开发
 
 ```sh

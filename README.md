@@ -68,9 +68,16 @@ projects/<key>/archived.json { "version": 1, "sessionIds": [...] }
 ## 环境要求
 
 - Node.js `^22.19 || >=24`
-- DeepSeek Harness `0.1.7-alpha.1`（所有 `@deepseek-ai/*` 依赖均使用 npm 发布版本，不含本机 harness 链接）
+- DeepSeek Harness `0.1.7-rc.2`（所有 `@deepseek-ai/*` 依赖均使用 npm 发布版本，不含本机 harness 链接）
+- 两个包声明的 peer 线：`@deepseek-ai/cordis ^4.0.4`、`@deepseek-ai/schemastery ^3.18.4`、`cordis-plugin-loader ^1.0.5`、`cordis-plugin-include ^1.0.9`
 - PATH 中有 `git`，且同步远端需要 SSH key（host key 策略：`StrictHostKeyChecking=accept-new`）
 - 只有从源码构建时才需要 pnpm
+
+### 0.4.0：跟进 DeepSeek Harness 0.1.7-rc.2
+
+- 所有 `@deepseek-ai/*` peer 范围从 `0.1.7-alpha.1` 升到 `0.1.7-rc.2`，并同步 harness vendor 的 Cordis 线（`@deepseek-ai/cordis ^4.0.4`、`@deepseek-ai/schemastery ^3.18.4`、`cordis-plugin-loader ^1.0.5`、`cordis-plugin-include ^1.0.9`）。仍停留在 `0.1.7-alpha.1` 的 profile 无法安装本版本。
+- 会话工件格式未变（harness 的 Session 格式仍是 v4），0.3.x 写出的仓库继续可用。
+- 归档标记仍是只增并集，尽管 `0.1.7-rc.2` 新增了取消归档路径——见[已知限制](#已知限制)。
 
 ### 0.3.0 破坏性变更：全量同步 → 只同步置顶会话
 
@@ -193,7 +200,7 @@ pnpm build       # 两个包的 tsc + 浏览器 bundle（lib/client.js）
 - 仅支持 SSH 远端；HTTPS + token 未实现。
 - 投影预热是 fail-soft 的：某次预热失败（如持久化读异常）时该行暂时退回项目名显示，点开会话或以后再次导入时会刷新。
 - 冲突副本需要手动处理；页面只显示数量。
-- harness 的归档集合目前没有取消归档（unarchive）路径，因此归档是单向的（只增并集）：一旦在任何一台电脑归档，会话在所有电脑上都保持隐藏，且其仓库内的会话文件会被删除、不再同步。上游加入取消归档后，归档列表格式需要引入墓碑记录，且被删除的会话内容已无法从仓库恢复。
+- 共享归档标记是只增并集：DeepSeek Harness `0.1.7-rc.2` 已加入取消归档路径，但本机恢复会在下一个周期被并回的仓库标记撤销——仓库标记就是共享状态。要让取消归档传播，需要在每个项目的 `archived.json` 里加入墓碑记录（并升格式版本），本版本未实现。无论哪种情况，归档内容都无法从仓库恢复：标记落地时会话文件即被删除。
 - 清理是历史重写：本地与远端的历史提交被丢弃（最新树保留）。远端托管服务自身的对象库 GC（决定服务端占用何时回落）不在客户端控制范围内；若多台电脑几乎同时清理，`--force-with-lease` 会让后到者的强推失败并在下一周期重试，不会静默覆盖别人的新提交。
 - 若 harness 上游未来把会话同步并入核心 RPC，可以换回 RPC 原生变体，引擎无需改动。
 

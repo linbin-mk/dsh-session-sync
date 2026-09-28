@@ -18,6 +18,8 @@ The host half is [`@linbin-mk/dsh-session-sync`](https://www.npmjs.com/package/@
   name: '@linbin-mk/dsh-client-ui-settings-sync'
 ```
 
+Requires DeepSeek Harness `0.1.7-rc.2` (`@deepseek-ai/cordis ^4.0.4`), and peer-depends on the host half `@linbin-mk/dsh-session-sync ^0.4.0`.
+
 ## Development
 
 ```sh

@@ -25,7 +25,7 @@ The browser half is [`@linbin-mk/dsh-client-ui-settings-sync`](https://www.npmjs
     startupSyncDelayMs: 3000
 ```
 
-`startupSyncDelayMs` in `config` is a deployment choice; `enabled`, `remote`, `branch`, `intervalMinutes`, `mappings`, and `cleanup` are the live fields the settings page writes, persisted by the harness settings service into the profile patch document. Requires the `settings` and `sessionPersistence` services; a `workspaceRegistry` is optional (imported sessions attach to workspaces when present, and the repo's per-project `archived.json` marks are applied to the registry's archive set so sessions archived on other machines stay hidden here). A `webServer` is optional too — without one the plugin runs headless and simply serves no web routes. The switch notice listens on the harness `agent/pre-step` event (`dsh-agent`/`dsh-llm` peers): a deployment without agent services simply never fires an injection.
+`startupSyncDelayMs` in `config` is a deployment choice; `enabled`, `remote`, `branch`, `intervalMinutes`, `mappings`, and `cleanup` are the live fields the settings page writes, persisted by the harness settings service into the profile patch document. Requires DeepSeek Harness `0.1.7-rc.2` (peers: `@deepseek-ai/cordis ^4.0.4`, `@deepseek-ai/schemastery ^3.18.4`, `cordis-plugin-loader ^1.0.5`, `cordis-plugin-include ^1.0.9`). Requires the `settings` and `sessionPersistence` services; a `workspaceRegistry` is optional (imported sessions attach to workspaces when present, and the repo's per-project `archived.json` marks are applied to the registry's archive set so sessions archived on other machines stay hidden here). A `webServer` is optional too — without one the plugin runs headless and simply serves no web routes. The switch notice listens on the harness `agent/pre-step` event (`dsh-agent`/`dsh-llm` peers): a deployment without agent services simply never fires an injection.
 
 ## Repository format
 
@@ -38,7 +38,7 @@ conflicts/<key>/<stem>-<host>.jsonl
 
 Each session artifact starts with a `dsh-session-sync` versioned header containing the portable project key, the current public Session header fields, and `inheritedEventCount`; each remaining line is one logical `SessionEvent`. It never embeds a persistence backend's physical row encoding. Artifacts from the earlier raw-storage implementation are rejected rather than migrated.
 
-Archive lists are convergent grow-only unions: the harness archive set has no unarchive path, so every machine unions the repo's marks into its own registry and unions its own marks back. An archived session's `session-<id>.jsonl` is deleted from the repo (its local copy is untouched), so archived sessions stop consuming git space; only the mark keeps travelling.
+Archive lists are convergent grow-only unions: every machine unions the repo's marks into its own registry and unions its own marks back. They stay grow-only in this release, so a session restored through the harness unarchive path (`0.1.7-rc.2`) is archived again by the shared mark on the next cycle; dropping a mark needs a tombstone in `archived.json`, which the repository format does not have yet. An archived session's `session-<id>.jsonl` is deleted from the repo (its local copy is untouched), so archived sessions stop consuming git space; only the mark keeps travelling.
 
 ## HTTP API
 
