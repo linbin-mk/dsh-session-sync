@@ -1,15 +1,15 @@
 /**
- * Build config for the browser plugin. Two artifacts:
+ * Build config for this package's browser half. One artifact:
  *
- * - the Node half (`lib/index.js`, `lib/invariant.js`): bundled from the
- *   `tsc`-emitted `lib/types` entries, so the harness Loader can import the
- *   package's node entry;
- * - the browser bundle (`lib/client.js`): a closure-factory artifact that
+ * - the browser bundle (`lib/client.js`), a closure-factory artifact that
  *   calls `window.__ModuleLoader__.load({ id, factory })` and resolves
  *   platform modules through the injected require (the harness module table
  *   — cordis DI entities, no globals). CSS Modules are compiled by
  *   lightningcss inside the bundle and inject a `<style data-plugin>` tag at
  *   factory execution.
+ *
+ * The Host half is plain `tsc` output (`lib/index.js`), so this config emits
+ * only the bundle; `build` runs `tsc -p . && tsdown`.
  *
  * The externals and purity rules mirror the harness's own client bundle
  * preset (packages/client/tsdown.client.ts): platform seed entries stay
@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url'
 import type { UserConfig } from 'tsdown'
 import { transform } from 'lightningcss'
 
-const PLUGIN_ID = '@linbin-mk/dsh-client-ui-settings-sync'
+const PLUGIN_ID = '@linbin-mk/dsh-session-sync'
 
 /** The platform module specifiers the harness shell shares into its frozen module table. */
 const CLIENT_EXTERNALS: readonly string[] = [
@@ -55,19 +55,6 @@ const CSS_VIRTUAL_SUFFIX = '.mjs'
  * the artifact differ per machine. Ids are therefore relative to this package.
  */
 const BUNDLE_ROOT = dirname(fileURLToPath(import.meta.url))
-
-/** The Node half: the loader-importable library entries from the tsc-emitted files. */
-const libConfig: UserConfig = {
-  name: PLUGIN_ID,
-  entry: ['lib/types/index.js', 'lib/types/invariant.js'],
-  outDir: 'lib',
-  format: ['esm'],
-  platform: 'node',
-  target: 'es2024',
-  dts: false,
-  clean: false,
-  fixedExtension: false,
-}
 
 /** The browser half: one CJS closure-factory bundle. */
 const clientConfig: UserConfig = {
@@ -164,4 +151,4 @@ const clientConfig: UserConfig = {
   },
 }
 
-export default [libConfig, clientConfig]
+export default clientConfig

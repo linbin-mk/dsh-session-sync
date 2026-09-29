@@ -7,7 +7,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { resolveSlotLabel } from '@deepseek-ai/dsh-client-ui-slots'
-import { apply, inject, refreshIfLoaded } from '@linbin-mk/dsh-client-ui-settings-sync/client'
+import { apply, inject, refreshIfLoaded } from '../src/client/index.ts'
 import { SyncSection } from '../src/client/SyncSection.tsx'
 import type { SyncSectionInjected } from '../src/client/SyncSection.tsx'
 import { SyncStatusFooter } from '../src/client/SyncStatusFooter.tsx'
@@ -55,7 +55,7 @@ function declare(slots: FakeSlots): void {
   slots.declare('shell.overlay')
 }
 
-describe('ui-settings-sync apply', () => {
+describe('session-sync apply', () => {
   it('declares the services it uses', () => {
     expect(inject).toEqual(['slots', 'locale', 'remote', 'configForms'])
   })

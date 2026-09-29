@@ -16,7 +16,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { HostObservable, PropsHooks, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { SessionSyncRecord } from '@linbin-mk/dsh-session-sync'
+import type { SessionSyncRecord } from '../api.ts'
 import type { SyncSectionController } from './controller.ts'
 import type { en } from './locales.ts'
 import css from './SessionSyncDialog.module.css'

@@ -95,7 +95,7 @@ export function refreshIfLoaded(controller: SyncSectionController): void {
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
-  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-settings-sync: copy dictionaries')
+  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'session-sync: copy dictionaries')
 
   // The shared form of this plugin's own Host entry: the section reads, the
   // accepted values, and the revision-fenced write queue live there.
@@ -175,7 +175,7 @@ export function apply(ctx: ClientContext): void {
       }),
     ]
     return () => { for (const dispose of disposers) dispose() }
-  }, 'ui-settings-sync: pushed invalidations')
+  }, 'session-sync: pushed invalidations')
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',

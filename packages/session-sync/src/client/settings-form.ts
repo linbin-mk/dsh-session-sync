@@ -9,7 +9,7 @@
  * so "changed" costs one template string and stays correct for the nested
  * cleanup block. v2 removed the project-mapping list: what synchronizes is the
  * explicit session selection, which is not a settings field at all.
- * @module @linbin-mk/dsh-client-ui-settings-sync/settings-form
+ * @module @linbin-mk/dsh-session-sync/settings-form
  */
 
 import type { SyncSettingsDraft } from './controller.ts'

@@ -18,7 +18,7 @@
  *
  * Runtime behavior does not depend on this file: slot registration travels
  * as the ordinary `name` string, and this module emits nothing.
- * @module @linbin-mk/dsh-client-ui-settings-sync/client/slot-contract
+ * @module @linbin-mk/dsh-session-sync/client/slot-contract
  */
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {

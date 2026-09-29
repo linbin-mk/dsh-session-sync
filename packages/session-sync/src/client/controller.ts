@@ -25,7 +25,7 @@ import type { ObservableSnapshot } from './store.ts'
 import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {
   SessionSyncRecord, SessionSyncSelectionView, SessionSyncStatusView, SyncLogEntry,
-} from '@linbin-mk/dsh-session-sync'
+} from '../api.ts'
 import type { SyncApi } from './api.ts'
 
 /** Settings namespace owned by the host session-sync plugin. */

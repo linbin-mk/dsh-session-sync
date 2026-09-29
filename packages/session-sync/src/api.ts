@@ -2,7 +2,7 @@
  * Wire contract of the session-sync HTTP API: the status view, the selection
  * tree, one session's sync records, the settings view, and the request and
  * response shapes the plugin's own web routes serve. The browser half
- * (`@linbin-mk/dsh-client-ui-settings-sync`) imports these types type-only;
+ * (this package's `./client` half) imports these types type-only;
  * the runtime values travel as JSON over the routes registered in
  * {@link ./routes.ts}.
  * @module @linbin-mk/dsh-session-sync/api

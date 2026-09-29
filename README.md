@@ -65,8 +65,7 @@ harness 的 RPC 表（`apiproxy`）是编译器锁死的静态注册表——第
 ## 仓库结构
 
 ```
-packages/session-sync/             @linbin-mk/dsh-session-sync（host 插件）
-packages/client-ui-settings-sync/  @linbin-mk/dsh-client-ui-settings-sync（浏览器插件）
+packages/session-sync/  @linbin-mk/dsh-session-sync（host 半边 + 浏览器半边，一个包）
 ```
 
 host 包包含同步引擎（`engine.ts`、`format.ts`、`git.ts`、`settings.ts`）、选择树投影（`selection.ts`）、服务（`index.ts`）与 HTTP 层（`api.ts`、`routes.ts`）。浏览器包含设置页、集合树、会话行菜单项、同步日志弹窗、状态页脚、页面控制器与 fetch 客户端。
@@ -103,6 +102,13 @@ logs/            周期日志
 - PATH 中有 `git`，且同步远端需要 SSH key（host key 策略：`StrictHostKeyChecking=accept-new`）
 - 只有从源码构建时才需要 pnpm
 
+### 0.6.0 破坏性变更：两个包合并成一个
+
+host 半边与浏览器半边现在是**同一个包** `@linbin-mk/dsh-session-sync`：`main` 是 Host 插件，`exports["./client"]` 是 Web 客户端加载的浏览器 bundle，`dsh.client` + `dsh.bundle` 让**一行** profile 条目同时承载两半（与 harness 自己的 `@deepseek-ai/dsh-experimental-inspector` 同一形态）。`@linbin-mk/dsh-client-ui-settings-sync` 不再发布新版本。
+
+- **升级要两步**：先 `dsh plugin --profile <name> remove @linbin-mk/dsh-client-ui-settings-sync` 把旧的那行摘掉，再 `dsh plugin --profile <name> add @linbin-mk/dsh-session-sync`。不摘旧行的话，旧包仍会注册同一批槽（`settings.section` / `sidebar.footer.action` / `sidebar.workspaces.session.menu.item` / `shell.overlay`），与新包重复。
+- 顺带删掉了旧浏览器包里的 `./invariant` 空伴生导出（没有任何 patch 行引用它）。
+
 ### 0.5.0 破坏性变更：从「置顶即同步」到「逐会话显式同步」
 
 - **同步选择换了主人。** v0.4 的选择 = 映射项目 ∩ 置顶会话，靠 harness 的置顶集合承载；v0.5 是插件自己的显式集合，入口在会话行 `...` 菜单。插件不再读写任何置顶状态。
@@ -112,13 +118,11 @@ logs/            周期日志
 
 ## 安装
 
-把两个已发布的包装进自定义 Web profile。两个包各自声明 `dsh.bundle` patch，Host 行与 Client 行会自动加入：
+把已发布的包装进自定义 Web profile。包声明了 `dsh.bundle` patch，**一行**会自动加入，它同时承载 Host 半边与浏览器半边：
 
 ```sh
 dsh --profile web-sync --from-default-profile web --dump-config
-dsh plugin --profile web-sync add \
-  @linbin-mk/dsh-session-sync \
-  @linbin-mk/dsh-client-ui-settings-sync
+dsh plugin --profile web-sync add @linbin-mk/dsh-session-sync
 dsh --profile web-sync
 ```
 
@@ -128,19 +132,14 @@ dsh --profile web-sync
 cd dsh-session-sync
 pnpm install && pnpm build
 pnpm --dir packages/session-sync pack
-pnpm --dir packages/client-ui-settings-sync pack
 
-dsh plugin --profile web-sync add \
-  ./linbin-mk-dsh-session-sync-0.5.0.tgz \
-  ./linbin-mk-dsh-client-ui-settings-sync-0.5.0.tgz
+dsh plugin --profile web-sync add ./linbin-mk-dsh-session-sync-0.6.0.tgz
 ```
 
 从同一个 profile 移除：
 
 ```sh
-dsh plugin --profile web-sync remove \
-  @linbin-mk/dsh-session-sync \
-  @linbin-mk/dsh-client-ui-settings-sync
+dsh plugin --profile web-sync remove @linbin-mk/dsh-session-sync
 ```
 
 ## 组合配置
@@ -150,10 +149,6 @@ dsh plugin --profile web-sync remove \
   name: '@linbin-mk/dsh-session-sync'
   config:
     startupSyncDelayMs: 3000
-
-# 在你的 web bundle 的浏览器插件列表中：
-- id: ui-settings-sync
-  name: '@linbin-mk/dsh-client-ui-settings-sync'
 ```
 
 安装会自动加入上面的两行。host 插件要求 `settings` 与 `sessionPersistence` 服务；`workspaceRegistry` 现在是**必需的能力**（没有它就无法按名匹配或导出任何会话，插件会跳过导出并报告），存在 `sessionProjectionCache`（可选注入）时导入完成即预热投影缓存，同时设置页用它零 I/O 地读出会话标题。
@@ -201,8 +196,8 @@ pnpm build       # 两个包的 tsc + 浏览器 bundle（lib/client.js）
 
 已发布的 harness 客户端包只以浏览器 bundle 形式提供其 `/client` 运行时面（它们经 harness 模块表加载），第三方包无法在 Node 测试里导入 `SlotRegistry`、`createSnapshotStore` 或测试运行时。因此本仓库：
 
-- 把小型快照存储引擎 vendor 进 `packages/client-ui-settings-sync/src/client/store.ts`（裁剪自 harness 的 MIT 源码并注明出处），并且
-- 在 `packages/client-ui-settings-sync/tests/helpers.ts` 中用最小假件测试 slot 注册、locale 与 remote 失效路径。
+- 把小型快照存储引擎 vendor 进 `packages/session-sync/src/client/store.ts`（裁剪自 harness 的 MIT 源码并注明出处），并且
+- 在 `packages/session-sync/tests/helpers.ts` 中用最小假件测试 slot 注册、locale 与 remote 失效路径。
 
 真实 slot 核心行为由 harness 侧集成覆盖。
 
@@ -241,4 +236,4 @@ pnpm build       # 两个包的 tsc + 浏览器 bundle（lib/client.js）
 
 MIT —— 见 [LICENSE](LICENSE)。
 
-`packages/client-ui-settings-sync/src/client/store.ts` 中的快照存储引擎裁剪自采用 MIT 许可证的 DeepSeek Harness；浏览器 bundle（`lib/client.js`）在构建期内联了同样采用 MIT 许可证的 zustand、immer 与 clsx。上述上游版权声明与许可证文本见 [NOTICE](NOTICE)。
+`packages/session-sync/src/client/store.ts` 中的快照存储引擎裁剪自采用 MIT 许可证的 DeepSeek Harness；浏览器 bundle（`lib/client.js`）在构建期内联了同样采用 MIT 许可证的 zustand、immer 与 clsx。上述上游版权声明与许可证文本见 [NOTICE](NOTICE)。

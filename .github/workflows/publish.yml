@@ -1,8 +1,8 @@
-# Publish both packages to npm from a GitHub Release.
+# Publish the package to npm from a GitHub Release.
 #
 # Authentication uses npm trusted publishing (OIDC), so no NPM_TOKEN secret is
-# stored in this repository. Every published package needs its own connection on
-# npm, configured once:
+# stored in this repository. The package needs its own connection on npm,
+# configured once:
 #
 #   Package → Settings → Trusted Publisher → GitHub Actions
 #     Organization or user : linbin-mk
@@ -19,10 +19,10 @@
 # npm has no pending-publisher concept, so the first version of each package
 # must be published by hand before this workflow can take over.
 #
-# Releasing: bump "version" in all three manifests, commit, tag `v<version>`,
-# push the tag, then publish a GitHub Release for that tag. The tag must agree
-# with every manifest, and a version already on the registry is skipped — so a
-# manual `workflow_dispatch` run is a safe rehearsal that only builds and tests.
+# Releasing: bump "version" in both manifests, commit, tag `v<version>`, push
+# the tag, then publish a GitHub Release for that tag. The tag must agree with
+# every manifest, and a version already on the registry is skipped — so a manual
+# `workflow_dispatch` run is a safe rehearsal that only builds and tests.
 
 name: publish
 
@@ -92,7 +92,6 @@ jobs:
             const manifests = [
               "package.json",
               "packages/session-sync/package.json",
-              "packages/client-ui-settings-sync/package.json",
             ]
             const tag = process.env.RELEASE_TAG
             const versions = manifests.map(file => [file, JSON.parse(fs.readFileSync(file, "utf8")).version])
@@ -105,13 +104,11 @@ jobs:
             console.log(`release tag ${tag} matches every manifest`)
           '
 
-      # Dependency order matters: the browser package peer-depends on the host
-      # package, so the host half must exist on the registry first.
-      - name: Publish every package that is not on the registry yet
+      - name: Publish the package when it is not on the registry yet
         if: ${{ github.event_name == 'release' }}
         run: |
           set -eu
-          for dir in packages/session-sync packages/client-ui-settings-sync; do
+          for dir in packages/session-sync; do
             name=$(node -p "require('./$dir/package.json').name")
             version=$(node -p "require('./$dir/package.json').version")
             if npm view "$name@$version" version >/dev/null 2>&1; then

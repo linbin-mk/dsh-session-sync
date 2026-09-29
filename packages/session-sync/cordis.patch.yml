@@ -1,3 +1,5 @@
+# One row carries both halves: this package's Host plugin AND, through its
+# `exports["./client"]` + `dsh.client`, the browser half the Web client loads.
 - insert:
     - id: session-sync
       name: '@linbin-mk/dsh-session-sync'

@@ -19,7 +19,7 @@ import { Button, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { HostObservable, PropsHooks, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
   SessionSyncSelectionSessionView, SessionSyncSelectionView, SyncLogEntry,
-} from '@linbin-mk/dsh-session-sync'
+} from '../api.ts'
 import type { SyncSectionController, SyncSectionState, SyncSettingsDraft } from './controller.ts'
 import { CLEANUP_PERIOD_CHOICES, SYNC_INTERVAL_CHOICES } from './controller.ts'
 import type { en } from './locales.ts'

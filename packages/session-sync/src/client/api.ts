@@ -17,13 +17,13 @@
  * are the v2 additions: `sync.json`'s selection is what the row menu and the
  * settings page both read, and closing sync is the same route pair the host
  * engine uses.
- * @module @linbin-mk/dsh-client-ui-settings-sync/client/api
+ * @module @linbin-mk/dsh-session-sync/client/api
  */
 
 import type {
   SessionSyncPendingView, SessionSyncRecord, SessionSyncSelectionSessionView, SessionSyncSelectionView,
   SessionSyncSelectionWorkspaceView, SessionSyncSettingsView, SessionSyncStatusView, SyncLogEntry,
-} from '@linbin-mk/dsh-session-sync'
+} from '../api.ts'
 
 /**
  * Route pathnames the host registers. The host package exports the same

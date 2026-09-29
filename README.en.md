@@ -65,8 +65,7 @@ The UI itself also rides entirely on the harness's open slots — nothing needs 
 ## Repository layout
 
 ```
-packages/session-sync/             @linbin-mk/dsh-session-sync (host plugin)
-packages/client-ui-settings-sync/  @linbin-mk/dsh-client-ui-settings-sync (browser plugin)
+packages/session-sync/  @linbin-mk/dsh-session-sync (host half + browser half, one package)
 ```
 
 The host package holds the sync engine (`engine.ts`, `format.ts`, `git.ts`, `settings.ts`), the selection-tree projection (`selection.ts`), the service (`index.ts`), and the HTTP surface (`api.ts`, `routes.ts`). The browser package holds the settings page, the session tree, the session-row menu item, the sync-log dialog, the status footer, the page controller, and the fetch client.
@@ -103,6 +102,13 @@ logs/            cycle logs
 - `git` on PATH and an SSH key for the sync remote (host key checking: `StrictHostKeyChecking=accept-new`)
 - pnpm, but only when building from source
 
+### 0.6.0 breaking change: the two packages became one
+
+The Host half and the browser half are now **one package**, `@linbin-mk/dsh-session-sync`: `main` is the Host plugin, `exports["./client"]` is the browser bundle the Web client loads, and `dsh.client` + `dsh.bundle` let **one** profile row carry both (the same shape the harness uses for `@deepseek-ai/dsh-experimental-inspector`). `@linbin-mk/dsh-client-ui-settings-sync` receives no further releases.
+
+- **Upgrade takes two steps**: remove the old row first with `dsh plugin --profile <name> remove @linbin-mk/dsh-client-ui-settings-sync`, then `dsh plugin --profile <name> add @linbin-mk/dsh-session-sync`. Leaving the old row in place keeps the old package registering the same slots (`settings.section` / `sidebar.footer.action` / `sidebar.workspaces.session.menu.item` / `shell.overlay`) beside the merged one.
+- The old browser package's empty `./invariant` companion export is gone as well; no patch row referenced it.
+
 ### 0.5.0 breaking change: from "pinning is syncing" to explicit per-session sync
 
 - **The selection changed hands.** The v0.4 selection was *mapped project ∩ pinned session*, carried by the harness pin set; v0.5 is the plugin's own explicit set, entered from the session row's `...` menu. The plugin no longer reads or writes any pin state.
@@ -112,13 +118,11 @@ logs/            cycle logs
 
 ## Install
 
-Install the two published packages into a custom Web profile. Each package declares its own `dsh.bundle` patch, so the Host and Client plugin rows are added automatically:
+Install the published package into a custom Web profile. It declares a `dsh.bundle` patch, so **one** row joins automatically — and that row carries both the Host half and the browser half:
 
 ```sh
 dsh --profile web-sync --from-default-profile web --dump-config
-dsh plugin --profile web-sync add \
-  @linbin-mk/dsh-session-sync \
-  @linbin-mk/dsh-client-ui-settings-sync
+dsh plugin --profile web-sync add @linbin-mk/dsh-session-sync
 dsh --profile web-sync
 ```
 
@@ -128,19 +132,14 @@ To install locally built tarballs instead:
 cd dsh-session-sync
 pnpm install && pnpm build
 pnpm --dir packages/session-sync pack
-pnpm --dir packages/client-ui-settings-sync pack
 
-dsh plugin --profile web-sync add \
-  ./linbin-mk-dsh-session-sync-0.5.0.tgz \
-  ./linbin-mk-dsh-client-ui-settings-sync-0.5.0.tgz
+dsh plugin --profile web-sync add ./linbin-mk-dsh-session-sync-0.6.0.tgz
 ```
 
 Remove both from the same profile:
 
 ```sh
-dsh plugin --profile web-sync remove \
-  @linbin-mk/dsh-session-sync \
-  @linbin-mk/dsh-client-ui-settings-sync
+dsh plugin --profile web-sync remove @linbin-mk/dsh-session-sync
 ```
 
 ## Composition
@@ -150,13 +149,9 @@ dsh plugin --profile web-sync remove \
   name: '@linbin-mk/dsh-session-sync'
   config:
     startupSyncDelayMs: 3000
-
-# in the browser roster of your web bundle:
-- id: ui-settings-sync
-  name: '@linbin-mk/dsh-client-ui-settings-sync'
 ```
 
-The install adds the two rows above automatically. The host plugin requires the `settings` and `sessionPersistence` services; `workspaceRegistry` is now a **required capability** (without it there is no matching by name and no session can be exported — the plugin skips exports and reports it), and with a `sessionProjectionCache` present (an optional injection) an import pre-warms the projection cache as soon as it completes, while the settings page also uses it to read session titles with zero I/O.
+The install adds that row automatically; the same row carries both halves (the Host plugin and the browser bundle the Web client loads). The host plugin requires the `settings` and `sessionPersistence` services; `workspaceRegistry` is now a **required capability** (without it there is no matching by name and no session can be exported — the plugin skips exports and reports it), and with a `sessionProjectionCache` present (an optional injection) an import pre-warms the projection cache as soon as it completes, while the settings page also uses it to read session titles with zero I/O.
 
 ## Configuration
 
@@ -201,8 +196,8 @@ The design and implementation contract is in [`docs/spec/session-sync-v2.md`](do
 
 The published harness client packages ship their `/client` runtime surfaces only as browser bundles (they are loaded through the harness module table), so a third-party package cannot import `SlotRegistry`, `createSnapshotStore`, or the test runtime in Node tests. This repo therefore:
 
-- vendors the small snapshot-store engine into `packages/client-ui-settings-sync/src/client/store.ts` (trimmed from the harness MIT source, with attribution), and
-- exercises slot registration, locale, and remote invalidation against minimal fakes in `packages/client-ui-settings-sync/tests/helpers.ts`.
+- vendors the small snapshot-store engine into `packages/session-sync/src/client/store.ts` (trimmed from the harness MIT source, with attribution), and
+- exercises slot registration, locale, and remote invalidation against minimal fakes in `packages/session-sync/tests/helpers.ts`.
 
 Real-slot-core behavior is covered by the harness-side integration.
 
@@ -241,4 +236,4 @@ Real-slot-core behavior is covered by the harness-side integration.
 
 MIT — see [LICENSE](LICENSE).
 
-The vendored snapshot-store engine in `packages/client-ui-settings-sync/src/client/store.ts` is trimmed from DeepSeek Harness (MIT), and the browser bundle (`lib/client.js`) inlines zustand, immer, and clsx (all MIT) at build time. The upstream copyright notices and license text are reproduced in [NOTICE](NOTICE).
+The vendored snapshot-store engine in `packages/session-sync/src/client/store.ts` is trimmed from DeepSeek Harness (MIT), and the browser bundle (`lib/client.js`) inlines zustand, immer, and clsx (all MIT) at build time. The upstream copyright notices and license text are reproduced in [NOTICE](NOTICE).

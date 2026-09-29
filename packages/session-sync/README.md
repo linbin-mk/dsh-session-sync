@@ -15,7 +15,7 @@ dsh-session-sync 插件的 host 半边：DeepSeek Harness 的 git 后端自动�
 - 切换提醒（`SWITCH_NOTICE_TEXT`、`createSwitchNoticeMessage`、`withSwitchNotice`）：为「切换电脑后首次续聊」注入一次本包自有 source kind 的 `notice` 消息。
 - HTTP 面（`registerSessionSyncRoutes`、路由常量、`parseSessionRoute`、wire 类型），挂载 `webServer` 时注册到 harness 的开放路由缝。
 
-浏览器半边见 [`@linbin-mk/dsh-client-ui-settings-sync`](https://www.npmjs.com/package/@linbin-mk/dsh-client-ui-settings-sync)。
+浏览器半边**在同一个包里**：`exports["./client"]` 是 Web 客户端加载的 bundle（`lib/client.js`），由 `dsh.client` 声明。合并前它是独立的 `@linbin-mk/dsh-client-ui-settings-sync`，v0.6.0 起并入本包，那个包不再发布新版本——升级时记得先把旧行 `dsh plugin --profile <name> remove @linbin-mk/dsh-client-ui-settings-sync` 摘掉。
 
 ## 组合配置
 
@@ -69,6 +69,16 @@ conflicts/<key>/<session-id>-<host>.jsonl
 ## 配置项
 
 `session-sync` 这一行 profile 条目的 Cordis Config：`startupSyncDelayMs`（部署项，默认 3000）与用户可改的 `enabled`、`remote`（SSH 地址）、`branch`（默认 `main`）、`intervalMinutes`（默认 5）、`cleanup`。v2 已删除 `mappings`：同步范围是插件自己的显式集合，跨机落位靠工作区名称，机器上不再有任何按项目的配置。设置页通过 harness 的 config form 读写这些字段（`ctx.configForms.get('session-sync')`），写入持久化在 profile patch 文档里。完整表格见[仓库 README](https://github.com/linbin-mk/dsh-session-sync#readme)。
+
+## 浏览器半边
+
+`src/client/` 是 Web 客户端那一半：设置页（`settings.section` id `sync`）、侧栏状态点（`sidebar.footer.action` id `session-sync-status`）、会话行菜单项（`sidebar.workspaces.session.menu.item` id `session-sync.toggle`，order 500）与同步记录弹窗（`shell.overlay` id `session-sync.dialog`）。
+
+设置段的读写走 harness 通用的 config form（`ctx.configForms.get('session-sync')`：读取、订阅推送，写入是带修订号围栏的 `mutate`），因此不碰 harness 的 RPC 表；状态、集合树、手动同步/清理与每会话记录经 host 自建的同源 HTTP API（`/session-sync/*`，普通 `fetch`）传输。Host 把偏好保留在浏览器进程内的页面（非 loopback，`mode: 'memory'`）只读展示配置、禁用全部写入控件；config form 把 host 的拒绝压成 `false`，此时页面再用插件的 `POST /session-sync/settings` 取回拒绝原因。工作区选项来自标准的 `useWorkspaces` hook。
+
+`lib/client.js` 由 `tsdown.config.ts` 打成 CJS 闭包工厂（`window.__ModuleLoader__.load`），CSS Modules 在构建期内联为 `<style data-plugin>`；构建带一条纯度门：平台模块（`react`、`ui-slots`、`ui-primitives` 等）保持 external，跨插件值导入直接构建失败。
+
+**测试环境说明**：已发布的 harness 客户端包只以浏览器 bundle 形式提供其 `/client` 运行时面，第三方包无法在 Node 测试里导入 `SlotRegistry` 或测试运行时。因此本包把小型快照存储引擎 vendor 进 `src/client/store.ts`（裁剪自 harness 的 MIT 源码并注明出处，见 [NOTICE](NOTICE)），并在 `tests/helpers.ts` 与 `tests/ui-primitives.tsx` 中用最小假件测试 slot 注册、locale 与 remote 失效路径；真实 slot 核心行为由 harness 侧集成覆盖。组件用例自带 `// @vitest-environment jsdom`，与 host 用例共用一份 vitest 配置。
 
 ## 开发
 

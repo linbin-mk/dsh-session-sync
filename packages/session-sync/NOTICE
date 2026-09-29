@@ -5,7 +5,7 @@ This distribution includes the third-party material listed below. Each entry
 reproduces the copyright notice and license text that its license requires.
 
 ================================================================================
-packages/client-ui-settings-sync/src/client/store.ts — DeepSeek Harness snapshot store
+packages/session-sync/src/client/store.ts — DeepSeek Harness snapshot store
 ================================================================================
 
 This file is a trimmed copy of the DeepSeek Harness snapshot-store engine

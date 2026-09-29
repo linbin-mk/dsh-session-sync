@@ -1,31 +1,7 @@
 {
   "name": "@linbin-mk/dsh-session-sync",
-  "description": "Git-backed session sync plugin for DeepSeek Harness: keeps sessions of mapped projects in sync across machines through one git repository, served to the web settings page through its own same-origin HTTP API",
-  "version": "0.5.0",
-  "type": "module",
-  "main": "lib/index.js",
-  "types": "lib/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./lib/index.d.ts",
-      "default": "./lib/index.js"
-    },
-    "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json"
-  },
-  "dsh": {
-    "bundle": {
-      "patch": "./cordis.patch.yml"
-    }
-  },
-  "files": [
-    "lib/**/*.js",
-    "lib/**/*.d.ts",
-    "cordis.patch.yml",
-    "README.md",
-    "README.en.md",
-    "LICENSE"
-  ],
+  "version": "0.6.0",
+  "description": "Session-sync plugin for DeepSeek Harness: git-backed cross-machine session sync with its own web settings surface, row-menu action, and sync-records dialog",
   "license": "MIT",
   "author": "linbin-mk (https://github.com/linbin-mk)",
   "repository": {
@@ -51,19 +27,75 @@
     "multi-machine",
     "typescript"
   ],
-  "publishConfig": {
-    "registry": "https://registry.npmjs.org",
-    "access": "public"
+  "type": "module",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ],
+      "platform": "web"
+    }
   },
   "scripts": {
-    "build": "tsc -p .",
+    "clean": "node --eval \"require('node:fs').rmSync('lib', { recursive: true, force: true })\"",
+    "build": "pnpm run clean && tsc -p . && tsdown",
+    "bundle": "tsdown",
     "typecheck": "tsc -p . --noEmit && tsc -p tsconfig.tests.json",
-    "test": "pnpm build && vitest run"
+    "test": "pnpm run build && vitest run"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "lib/client.js.map",
+    "lib/**/*.d.ts",
+    "cordis.patch.yml",
+    "README.md",
+    "README.en.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "dependencies": {
+    "clsx": "^2.0.0",
+    "immer": "^10.1.1",
+    "zustand": "~4.4.7"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.4",
-    "@deepseek-ai/schemastery": "^3.18.4",
     "@deepseek-ai/dsh-agent": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-api-remotes": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-connection": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-locale": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-renderer": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-settings": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-sidebar": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-workspace": "^0.1.7-rc.2",
     "@deepseek-ai/dsh-home-paths": "^0.1.7-rc.2",
     "@deepseek-ai/dsh-host-webserver": "^0.1.7-rc.2",
     "@deepseek-ai/dsh-llm": "^0.1.7-rc.2",
@@ -71,7 +103,9 @@
     "@deepseek-ai/dsh-session-persistence": "^0.1.7-rc.2",
     "@deepseek-ai/dsh-session-projection-cache": "^0.1.7-rc.2",
     "@deepseek-ai/dsh-settings": "^0.1.7-rc.2",
-    "@deepseek-ai/dsh-workspace": "^0.1.7-rc.2"
+    "@deepseek-ai/dsh-workspace": "^0.1.7-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.4",
+    "react": "^18.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-host-webserver": {
@@ -86,7 +120,16 @@
     "@deepseek-ai/cordis-plugin-include": "^1.0.9",
     "@deepseek-ai/cordis-plugin-loader": "^1.0.5",
     "@deepseek-ai/dsh-agent": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-api-remotes": "^0.1.7-rc.2",
     "@deepseek-ai/dsh-app-boot": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-connection": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-locale": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-renderer": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-settings": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-sidebar": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-workspace": "^0.1.7-rc.2",
     "@deepseek-ai/dsh-config-editor": "^0.1.7-rc.2",
     "@deepseek-ai/dsh-home-paths": "^0.1.7-rc.2",
     "@deepseek-ai/dsh-host-webserver": "^0.1.7-rc.2",
@@ -103,12 +146,20 @@
     "@deepseek-ai/dsh-storage-json": "^0.1.7-rc.2",
     "@deepseek-ai/dsh-workspace": "^0.1.7-rc.2",
     "@deepseek-ai/schemastery": "^3.18.4",
-    "@linbin-mk/dsh-session-sync": "workspace:^",
+    "@testing-library/react": "^16.3.2",
     "@types/node": "^22.20.0",
+    "@types/react": "~18.3.1",
+    "@types/react-dom": "~18.3.1",
+    "jsdom": "^29.1.1",
+    "lightningcss": "^1.32.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "tsdown": "0.22.2",
     "typescript": "^6.0.3",
     "vitest": "^4.1.8"
   },
-  "engines": {
-    "node": "^22.19.0 || >=24.0.0"
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
   }
 }

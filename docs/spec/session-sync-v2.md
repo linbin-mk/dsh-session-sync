@@ -195,6 +195,10 @@ conflicts/<key>/<session-id>-<host>.jsonl    冲突副本
 - 清理按周期重写历史并强推，保留提交的最新树原样保留。
 - 插件不存任何凭据。
 
+## 8.5 包结构（v0.6.0 起）
+
+host 与浏览器半边合并进**一个包** `@linbin-mk/dsh-session-sync`：`main` 是 Host 插件，`exports["./client"]` 是 Web 客户端加载的 bundle，`dsh.client` + `dsh.bundle` 让一行 profile 条目同时承载两半。源码分别位于 `src/`（host）与 `src/client/`（浏览器），构建是 `tsc -p . && tsdown`；测试共用一份 vitest 配置（组件用例自带 `// @vitest-environment jsdom`）。原独立包 `@linbin-mk/dsh-client-ui-settings-sync` 不再发布新版本，其空的 `./invariant` 伴生导出一并移除。
+
 ## 9. 影响面
 
 - **host**：`settings.ts`（−mappings）、`format.ts`（v2 四类文件）、`engine.ts`（选择/导入/导出/记录）、`api.ts`、`routes.ts`、`index.ts`（+选择存储、+按名解析工作区、−置顶端口、−看门狗）、`log.ts`。
