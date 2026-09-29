@@ -1,25 +1,32 @@
 /**
- * Session sync service (`ctx.sessionSync`): keeps this machine's sessions
- * for the mapped projects in a git repo and imports the other machines'
- * sessions from it, including each project's archived-session marks (a
- * session archived on one machine is hidden on every machine). An archived
- * session is retired from git — its repo artifact is deleted so archived
- * sessions stop consuming repo space — while only the grow-only mark in
- * `archived.json` keeps travelling. Configuration is the `session-sync`
- * profile entry's live Config (remote, branch, cadence, project mappings);
- * the worktree lives under `<harness home>/session-sync/repo`. Automatic cycles run on a timer
- * driven by `intervalMinutes`, once shortly after startup, and on demand via
- * `syncNow()` (the web settings page's button). Every cycle is contained:
- * session-level failures are reported on the status view, and only git
- * failures reject the call. Imported sessions bypass the live session store,
- * so the engine pre-warms the harness projection cache (when composed) after
- * every import — list rows then carry their title and other projection values
- * immediately instead of only after the session is opened. After a successful cycle the
- * `session-sync/completed` event publishes the outcome so transports can
- * refresh the client's session list. When the composition mounts a
- * `webServer`, the plugin also registers its own same-origin HTTP API
- * (`/session-sync/*`, see {@link ./routes.ts}) for the browser settings
- * page — no harness core package needs modification.
+ * Session sync service (`ctx.sessionSync`): keeps the sessions the user
+ * explicitly selected in a git repo and pulls the other machines' selected
+ * sessions back, placing each one in the local workspace whose title matches
+ * the repo workspace's manifest name. An archived session is retired from git
+ * — its repo artifact is deleted so archived sessions stop consuming repo
+ * space — while only the grow-only mark in `archived.json` keeps travelling.
+ *
+ * The selection is this plugin's own state: `selection.json` under the harness
+ * home is this machine's mirror, `state.json` is the anchor that separates a
+ * local edit from a repo-side change, and the worktree's `sync.json` is the
+ * cross-machine snapshot. Nothing about the harness pin set is read or
+ * written. Configuration is the `session-sync` profile entry's live Config
+ * (remote, branch, cadence, cleanup); the worktree lives under
+ * `<harness home>/session-sync/repo`. Automatic cycles run on a timer driven
+ * by `intervalMinutes`, once shortly after startup, and on demand —
+ * `syncNow()` from the settings page, or immediately after the user selects a
+ * session from the row menu.
+ *
+ * Every cycle is contained: session-level failures are reported on the status
+ * view, and only git failures reject the call. Imported sessions bypass the
+ * live session store, so the engine pre-warms the harness projection cache
+ * (when composed) after every import — list rows then carry their title and
+ * other projection values immediately instead of only after the session is
+ * opened. After a successful cycle the `session-sync/completed` event
+ * publishes the outcome so transports can refresh the client's session list.
+ * When the composition mounts a `webServer`, the plugin also registers its own
+ * same-origin HTTP API (`/session-sync/*`, see {@link ./routes.ts}) for the
+ * browser half — no harness core package needs modification.
  *
  * Switch notice: every cycle that imports foreign events into a session arms
  * a one-shot mark for that session (persisted under the harness home, so a
@@ -64,13 +71,20 @@ import type {} from '@deepseek-ai/dsh-workspace'
 import type {} from '@deepseek-ai/dsh-session-projection-cache'
 import { runSyncCycle } from './engine.ts'
 import type { SyncEngineDeps, SyncFilesystem, SyncPersistence, SyncProjectionCache, SyncWorkspaceRegistry } from './engine.ts'
-import { parsePinSnapshot, serializePinSnapshot } from './format.ts'
-import type { PinSnapshot } from './format.ts'
+import {
+  parseLocalSelection, parseRecords, parseSelection, parseState, recordsRepoPath,
+  selectionRepoPath, serializeLocalSelection, serializeState,
+} from './format.ts'
+import type {
+  LocalSelection, SessionSyncRecord, SyncSelectionEntry, SyncState,
+} from './format.ts'
+import { buildSelectionView } from './selection.ts'
+import type { SelectionTreeInput } from './selection.ts'
 import { GitRepository } from './git.ts'
 import { SyncLog } from './log.ts'
 import type { SyncLogEntry } from './log.ts'
 import {
-  Config, DEFAULT_STARTUP_SYNC_DELAY_MS, DEFAULT_WATCHDOG_INTERVAL_MS, SESSION_SYNC_NAMESPACE,
+  Config, DEFAULT_STARTUP_SYNC_DELAY_MS, SESSION_SYNC_NAMESPACE,
   readSettings, validateSessionSyncSettings,
 } from './settings.ts'
 import type { ConfigInput, SessionSyncSettings } from './settings.ts'
@@ -80,24 +94,41 @@ import type { SessionSyncWebServer } from './routes.ts'
 
 export {
   Config, DEFAULT_BRANCH, DEFAULT_CLEANUP_KEEP_COMMITS, DEFAULT_CLEANUP_PERIOD_HOURS,
-  DEFAULT_INTERVAL_MINUTES, DEFAULT_STARTUP_SYNC_DELAY_MS, DEFAULT_WATCHDOG_INTERVAL_MS,
+  DEFAULT_INTERVAL_MINUTES, DEFAULT_STARTUP_SYNC_DELAY_MS,
   SESSION_SYNC_NAMESPACE, readSettings, validateSessionSyncSettings,
 } from './settings.ts'
-export type { ConfigInput, SessionSyncCleanupSettings, SessionSyncMapping, SessionSyncSettings } from './settings.ts'
-export { compareLogs, decidePinSync, runSyncCycle } from './engine.ts'
+export type { ConfigInput, SessionSyncCleanupSettings, SessionSyncSettings } from './settings.ts'
+export { assignWorkspaceKey, compareLogs, decideSelectionSync, foldTitle, runSyncCycle } from './engine.ts'
 export type {
-  LogRelation, PinSelection, PinSyncInput, SyncEngineDeps, SyncFilesystem, SyncGit,
-  SyncPersistence, SyncPinBaseline, SyncProjectionCache, SyncRunResult, SyncWorkspace,
-  SyncWorkspaceRegistry,
+  LogRelation, PendingWorkspace, SelectionDecision, SelectionInput, SyncEngineDeps, SyncFilesystem,
+  SyncGit, SyncPersistence, SyncProjectionCache, SyncRunResult, SyncWorkspace, SyncWorkspaceRegistry,
 } from './engine.ts'
+export { buildSelectionView } from './selection.ts'
+export type { SelectionTreeInput } from './selection.ts'
 export { DEFAULT_GIT_RETRY, GitError, GitRepository } from './git.ts'
 export type { GitRetryPolicy } from './git.ts'
 export { SYNC_LOG_RETENTION_DAYS, SyncLog } from './log.ts'
 export type { SyncLogEntry, SyncLogKind } from './log.ts'
-export { CLEANUP_NOW_PATH, LOGS_PATH, STATUS_PATH, SYNC_NOW_PATH, SETTINGS_PATH, registerSessionSyncRoutes } from './routes.ts'
-export type { SessionSyncWebServer, SessionSyncRoutesService } from './routes.ts'
+export {
+  CLEANUP_NOW_PATH, LOGS_PATH, SELECTION_PATH, SESSIONS_PATH, SETTINGS_PATH, STATUS_PATH,
+  SYNC_NOW_PATH, parseSessionRoute, registerSessionSyncRoutes,
+} from './routes.ts'
+export type { SessionRoute, SessionSyncWebServer, SessionSyncRoutesService } from './routes.ts'
 export { isSettingsPatch } from './api.ts'
-export type { SessionSyncLogsView, SessionSyncSettingsView, SessionSyncStatusView, SessionSyncErrorView } from './api.ts'
+export type {
+  SessionSyncErrorView, SessionSyncLogsView, SessionSyncPendingView, SessionSyncRecordsView,
+  SessionSyncSelectionSessionView, SessionSyncSelectionView, SessionSyncSelectionWorkspaceView,
+  SessionSyncSettingsView, SessionSyncStatusView,
+} from './api.ts'
+export {
+  MANIFEST_NAME, SELECTION_NAME, SYNC_ARTIFACT_VERSION, SYNC_RECORD_LIMIT, SYNC_SELECTION_VERSION,
+  SYNC_STATE_VERSION, WORKSPACES_DIR, mergeRecords, parseManifest, parseSelection,
+  serializeManifest, serializeSelection,
+} from './format.ts'
+export type {
+  LocalSelection, SessionSyncRecord, SyncRecordDirection, SyncRecordResult, SyncSelection,
+  SyncSelectionEntry, SyncState, WorkspaceManifest,
+} from './format.ts'
 export {
   SWITCH_NOTICE_PLUGIN, SWITCH_NOTICE_SUMMARY, SWITCH_NOTICE_TEXT,
   createSwitchNoticeMessage, withSwitchNotice,
@@ -114,12 +145,14 @@ export interface SessionSyncCompleted {
   archived: number
   /** Archived sessions' repo artifacts deleted by the completed cycle. */
   deleted: number
-  /** Repo artifacts the completed cycle retired because the pin selection dropped them. */
-  deletedUnpinned: number
-  /** Sessions the completed cycle pinned to mirror the selection. */
-  pinned: number
-  /** Sessions the completed cycle unpinned because the selection dropped them. */
-  unpinned: number
+  /** Repo artifacts the completed cycle retired because the selection dropped them. */
+  deletedUnselected: number
+  /** Repo selection entries the completed cycle mirrored into this machine's selection. */
+  adopted: number
+  /** Local entries the completed cycle removed because the repo's selection dropped them. */
+  dropped: number
+  /** Repo workspaces whose selected sessions the cycle could not place locally. */
+  pending: number
   /** Repo-relative conflict-copy paths written by the completed cycle. */
   conflicts: string[]
   /** ISO-8601 instant the cycle finished. */
@@ -146,6 +179,19 @@ function messageOf(error: unknown): string {
 /** Whether a settings value holds an enabled plugin with a remote. */
 function configuredSettings(settings: SessionSyncSettings): boolean {
   return settings.enabled && settings.remote.trim().length > 0
+}
+
+/** Session ids accepted from the web API must satisfy the repo's own pattern. */
+const SESSION_ID_PATTERN = /^session-[A-Za-z0-9-]+$/
+
+/**
+ * Validate one session id from a web request before it reaches a file path.
+ * @param id - the raw request parameter.
+ * @returns the branded id.
+ */
+function requireSessionId(id: string): SessionId {
+  if (!SESSION_ID_PATTERN.test(id)) throw new Error(`session-sync: invalid session id '${id}'`)
+  return SessionId(id)
 }
 
 /** Whether a value is a plain data object the settings document merges field by field. */
@@ -179,27 +225,26 @@ export class SessionSyncService extends Service {
   /** In-flight git-space cleanup pass; cycles skip their due check while one runs. */
   private cleanupInflight: Promise<number> | undefined
   /**
-   * Watchdog that watches the one thing this plugin cannot be notified about:
-   * the user's own pin action writes the harness registry directly, so a pin
-   * edit publishes only once a cycle runs. The watchdog compares the local pin
-   * set with the last synced baseline every {@link DEFAULT_WATCHDOG_INTERVAL_MS}
-   * and starts a cycle when they diverge; a running cycle re-reads the pin set
-   * itself, so a tick during one is harmless.
+   * This machine's selection, cached for the synchronous status view and the
+   * row menu. Loaded lazily from `selection.json`; every mutation goes through
+   * {@link persistSelection}, so the cache never lags a write.
    */
-  private watchdog: ReturnType<typeof setInterval> | undefined
-  /** Epoch ms of the last watchdog-launched cycle (debounces a run of pin edits). */
-  private lastWatchdogLaunch = 0
-  /** Lazy one-time pin-baseline load (awaited before the watchdog decides). */
-  private baselineLoaded: Promise<PinSnapshot | undefined> | undefined
-  /** Serialized baseline persistence so concurrent writes cannot interleave. */
-  private baselineWrite: Promise<void> = Promise.resolve()
+  private cachedSelection: Set<string> | undefined
+  /** Lazy one-time selection load shared by concurrent readers. */
+  private selectionLoaded: Promise<Set<string>> | undefined
+  /** Serialized machine-local writes so concurrent edits cannot interleave. */
+  private localWrite: Promise<void> = Promise.resolve()
   private repoReady = false
   private lastSyncAt: string | undefined
   private lastError: string | undefined
   private lastErrorAt: string | undefined
   private lastRun: import('./api.ts').SessionSyncStatusView['lastRun'] = {
-    imported: 0, pushed: 0, archived: 0, deleted: 0, deletedUnpinned: 0, pinned: 0, unpinned: 0, conflicts: [],
+    imported: 0, pushed: 0, archived: 0, deleted: 0, deletedUnselected: 0, adopted: 0, dropped: 0, conflicts: [],
   }
+  /** Repo workspaces whose selected sessions the last cycle could not place. */
+  private pendingWorkspaces: import('./api.ts').SessionSyncPendingView[] = []
+  /** Set when a selection edit lands mid-cycle, so one more pass publishes it. */
+  private relaunchRequested = false
   /** Epoch ms of the last completed cleanup pass (drives the period check). */
   private lastCleanupAt: number | undefined
   /** Outcome of the last completed cleanup pass. */
@@ -291,13 +336,9 @@ export class SessionSyncService extends Service {
       this.activate(this.getSettings())
       const startup = setTimeout(() => {
         if (configuredSettings(this.getSettings())) this.launchIfIdle()
-        // The pin watchdog starts with the first cycle: before it, the baseline
-        // is a fresh machine's, and adopting it is the first cycle's own job.
-        this.armWatchdog()
       }, this.config.startupSyncDelayMs)
       return () => {
         clearInterval(this.timer)
-        clearInterval(this.watchdog)
         clearTimeout(startup)
       }
     }, 'sessionSync.lifecycle')
@@ -329,7 +370,8 @@ export class SessionSyncService extends Service {
       configured: configuredSettings(settings),
       repoReady: this.repoReady,
       running: this.inflight !== undefined,
-      pinnedCount: this.ctx.get('workspaceRegistry')?.pinnedSessionIds.length ?? 0,
+      syncedCount: this.cachedSelection?.size ?? 0,
+      pending: this.pendingWorkspaces.map(entry => ({ ...entry, sessionIds: [...entry.sessionIds] })),
       ...this.lastSyncAt !== undefined ? { lastSyncAt: this.lastSyncAt } : {},
       ...this.lastError !== undefined ? { lastError: this.lastError } : {},
       ...this.lastErrorAt !== undefined ? { lastErrorAt: this.lastErrorAt } : {},
@@ -395,7 +437,6 @@ export class SessionSyncService extends Service {
    */
   private activate(settings: SessionSyncSettings): void {
     this.reschedule(settings)
-    if (configuredSettings(settings)) this.armWatchdog()
   }
 
   /** Re-arm the automatic timer from the current settings. */
@@ -406,92 +447,229 @@ export class SessionSyncService extends Service {
     this.timer = setInterval(() => { this.launchIfIdle() }, settings.intervalMinutes * 60_000)
   }
 
-  /** Arm the pin watchdog (idempotent; the timer keeps running while enabled). */
-  private armWatchdog(): void {
-    if (this.watchdog !== undefined) return
-    this.watchdog = setInterval(() => { void this.watchPins() }, DEFAULT_WATCHDOG_INTERVAL_MS)
+  /** Path of this machine's selection mirror under the harness home. */
+  private selectionPath(): string {
+    return join(this.home, 'selection.json')
   }
 
-  /**
-   * One watchdog tick: when the local pin set no longer matches the last
-   * synced state, the user pinned or unpinned something, so start a cycle —
-   * that is the trigger this plugin has for the pin action. A tick while a
-   * cycle runs is dropped (the end of that cycle re-arms the check), edits
-   * arriving within {@link DEFAULT_WATCHDOG_INTERVAL_MS} of the previous
-   * launch wait for the next tick, and an unconfigured plugin stays idle
-   * while saying why.
-   */
-  private async watchPins(): Promise<void> {
-    if (this.inflight !== undefined) return
-    const settings = this.getSettings()
-    if (!configuredSettings(settings)) return
-    const registry = this.ctx.get('workspaceRegistry')
-    if (registry === undefined) return
-    const diverged = await this.pinsDiverged(registry.pinnedSessionIds.map(String))
-    if (diverged !== true) return
-    const now = Date.now()
-    if (now - this.lastWatchdogLaunch < DEFAULT_WATCHDOG_INTERVAL_MS) return
-    this.lastWatchdogLaunch = now
-    this.launchIfIdle()
+  /** Path of this machine's synchronization anchor under the harness home. */
+  private statePath(): string {
+    return join(this.home, 'state.json')
   }
 
-  /**
-   * Whether this machine's pin set differs from the last synced baseline.
-   * @param localIds - the registry's current pin set.
-   * @returns true when the user changed pins since the last cycle; false when
-   * they match; `undefined` when the baseline cannot be read, so the caller
-   * runs nothing on a guess.
-   */
-  private async pinsDiverged(localIds: readonly string[]): Promise<boolean | undefined> {
-    try {
-      const baseline = await this.pinBaseline()
-      if (baseline === undefined) return true // a machine with no baseline has everything to do
-      const known = new Set(baseline.sessionIds.map(String))
-      if (known.size !== new Set(localIds).size) return true
-      return localIds.some(id => !known.has(id))
-    } catch (error) {
-      /* v8 ignore next 2 -- only a real read fault reaches here; the next tick retries */
-      this.ctx.logger.warn(`session sync: pin watchdog skipped a tick: ${messageOf(error)}`)
-      return undefined
-    }
-  }
-
-  /** Path of the machine-local pin baseline under the harness home. */
-  private pinBaselinePath(): string {
-    return join(this.home, 'pins.json')
-  }
-
-  /** Load the pin baseline lazily; a missing file is the fresh-machine state. */
-  private pinBaseline(): Promise<PinSnapshot | undefined> {
-    if (this.baselineLoaded === undefined) this.baselineLoaded = this.loadPinBaseline()
-    return this.baselineLoaded
-  }
-
-  /** Read the pin baseline; a missing file is the ordinary fresh state (fail-soft). */
-  private async loadPinBaseline(): Promise<PinSnapshot | undefined> {
-    try {
-      return parsePinSnapshot(await readFile(this.pinBaselinePath(), 'utf8'))
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
-      this.ctx.logger.warn(`session sync: failed to load the pin baseline: ${messageOf(error)}`)
-      return undefined
-    }
-  }
-
-  /** Persist the pin baseline, serializing concurrent writes (fail-soft). */
-  private writePinBaseline(snapshot: PinSnapshot): Promise<void> {
-    const path = this.pinBaselinePath()
-    const text = serializePinSnapshot(snapshot)
-    this.baselineWrite = this.baselineWrite.then(async () => {
+  /** Write one machine-local file, serializing concurrent writes (fail-soft). */
+  private writeLocal(path: string, text: string): Promise<void> {
+    this.localWrite = this.localWrite.then(async () => {
       try {
         await mkdir(dirname(path), { recursive: true })
         await writeFile(path, text, 'utf8')
       } catch (error) {
-        /* v8 ignore next -- real filesystem faults warn and keep the baseline in memory */
-        this.ctx.logger.warn(`session sync: failed to persist the pin baseline: ${messageOf(error)}`)
+        /* v8 ignore next -- real filesystem faults warn and keep the in-memory state */
+        this.ctx.logger.warn(`session sync: failed to persist ${path}: ${messageOf(error)}`)
       }
     })
-    return this.baselineWrite
+    return this.localWrite
+  }
+
+  /** Read one machine-local JSON file; a missing file is the ordinary fresh state. */
+  private async readLocal<T>(path: string, parse: (text: string) => T): Promise<T | undefined> {
+    try {
+      return parse(await readFile(path, 'utf8'))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      this.ctx.logger.warn(`session sync: failed to load ${path}: ${messageOf(error)}`)
+      return undefined
+    }
+  }
+
+  /**
+   * This machine's selection, from the in-memory cache when it is loaded.
+   * Concurrent first readers share one load.
+   * @returns the selected session ids.
+   */
+  private selectionIds(): Promise<Set<string>> {
+    if (this.cachedSelection !== undefined) return Promise.resolve(this.cachedSelection)
+    this.selectionLoaded ??= (async () => {
+      const stored = await this.readLocal<LocalSelection>(this.selectionPath(), parseLocalSelection)
+      const loaded = new Set((stored?.sessionIds ?? []).map(String))
+      this.cachedSelection = loaded
+      return loaded
+    })()
+    return this.selectionLoaded
+  }
+
+  /** Persist this machine's selection and refresh the cache (web API + engine surface). */
+  private async persistSelection(ids: ReadonlySet<string>): Promise<void> {
+    const sorted = [...ids].sort()
+    this.cachedSelection = new Set(sorted)
+    this.selectionLoaded = Promise.resolve(this.cachedSelection)
+    await this.writeLocal(this.selectionPath(), serializeLocalSelection({
+      sessionIds: sorted.map(raw => SessionId(raw)),
+    }))
+  }
+
+  /** Read this machine's synchronization anchor (engine surface). */
+  private readState(): Promise<SyncState | undefined> {
+    return this.readLocal<SyncState>(this.statePath(), parseState)
+  }
+
+  /** Persist this machine's synchronization anchor (engine surface). */
+  private writeState(state: SyncState): Promise<void> {
+    return this.writeLocal(this.statePath(), serializeState(state))
+  }
+
+  /** Read this machine's selection mirror (engine surface). */
+  private readLocalSelection(): Promise<LocalSelection | undefined> {
+    return this.readLocal<LocalSelection>(this.selectionPath(), parseLocalSelection)
+  }
+
+  /**
+   * Persist the selection the engine applied, keeping the in-memory cache in
+   * step so the row menu and status view never lag the disk.
+   * @param selection - the mirror to store.
+   */
+  private async writeLocalSelection(selection: LocalSelection): Promise<void> {
+    this.cachedSelection = new Set(selection.sessionIds.map(String))
+    this.selectionLoaded = Promise.resolve(this.cachedSelection)
+    await this.writeLocal(this.selectionPath(), serializeLocalSelection(selection))
+  }
+
+  /** The repo's selection snapshot, when the worktree carries one. */
+  private async readRepoSelection(): Promise<SyncSelectionEntry[]> {
+    const text = await this.repoFilesystem().readRepoFile(selectionRepoPath())
+    if (text === undefined) return []
+    try {
+      return parseSelection(text).entries
+    } catch (error) {
+      /* v8 ignore next 2 -- a malformed snapshot is reported by the next cycle; the view shows what it can */
+      this.ctx.logger.warn(`session sync: failed to read the repo selection: ${messageOf(error)}`)
+      return []
+    }
+  }
+
+  /** One session's stored records, oldest first (empty when none or unreadable). */
+  private async readRecords(key: string, id: string): Promise<readonly SessionSyncRecord[]> {
+    const text = await this.repoFilesystem().readRepoFile(recordsRepoPath(key, SessionId(id)))
+    if (text === undefined) return []
+    try {
+      return parseRecords(text).records
+    } catch (error) {
+      /* v8 ignore next 2 -- a malformed record file only costs the dialog its history */
+      this.ctx.logger.warn(`session sync: failed to read records for ${id}: ${messageOf(error)}`)
+      return []
+    }
+  }
+
+  /** Titles read from the projection cache, keyed by session id (no log I/O). */
+  private cachedTitles(headers: readonly import('@deepseek-ai/dsh-session').SessionHeader[]): Map<string, string> {
+    const titles = new Map<string, string>()
+    const cache = this.ctx.get('sessionProjectionCache')
+    if (cache === undefined) return titles
+    for (const header of headers) {
+      const values = cache.cachedSnapshot(header, ['title'] as never)?.values as
+        | { title?: unknown }
+        | undefined
+      const title = values?.title
+      if (typeof title === 'string' && title.length > 0) titles.set(String(header.id), title)
+    }
+    return titles
+  }
+
+  /**
+   * The selection tree the settings page renders: workspaces → sessions, plus
+   * the pending list. Built on demand from the worktree's snapshot, this
+   * machine's selection, the workspace registry, and the projection cache —
+   * never from the cycle's result, so it is correct before the first cycle.
+   */
+  async selection(): Promise<import('./api.ts').SessionSyncSelectionView> {
+    const entries = await this.readRepoSelection()
+    const localIds = [...await this.selectionIds()]
+    const registry = this.ctx.get('workspaceRegistry')
+    const workspaces = registry?.list() ?? []
+    const headers = (await this.ctx.sessionPersistence.list()).map(snapshot => snapshot.header)
+    const heldIds = new Set(headers.map(header => String(header.id)))
+    const localTitles = this.cachedTitles(headers)
+
+    const keyById = new Map(entries.map(entry => [String(entry.id), entry.key]))
+    const recordsBySession = new Map<string, readonly SessionSyncRecord[]>()
+    for (const id of new Set([...entries.map(entry => String(entry.id)), ...localIds])) {
+      const key = keyById.get(id)
+      if (key === undefined) continue
+      recordsBySession.set(id, await this.readRecords(key, id))
+    }
+
+    // A locally selected session with no repo entry yet is grouped by the
+    // local workspace that holds it, so it shows up before its first push.
+    const localPlacement = new Map<string, string>()
+    const known = new Set(keyById.keys())
+    for (const id of localIds) {
+      if (known.has(id)) continue
+      const header = headers.find(candidate => String(candidate.id) === id)
+      if (header?.cwd === undefined || registry === undefined) continue
+      const workspace = await registry.resolveByPath(header.cwd)
+      if (workspace !== undefined) localPlacement.set(id, workspace.title)
+    }
+
+    const input: SelectionTreeInput = {
+      entries,
+      localIds,
+      workspaceTitles: workspaces.map(workspace => workspace.title),
+      heldIds,
+      localTitles,
+      localPlacement,
+      records: id => recordsBySession.get(id) ?? [],
+    }
+    return buildSelectionView(input)
+  }
+
+  /**
+   * Select one session for synchronization and start a cycle at once, so the
+   * user's click is the trigger instead of a timer tick.
+   * @param id - the session id from the row menu.
+   * @returns the fresh selection tree.
+   */
+  async selectSession(id: string): Promise<import('./api.ts').SessionSyncSelectionView> {
+    const sessionId = requireSessionId(id)
+    if (await this.ctx.sessionPersistence.stat(sessionId) === undefined) {
+      throw new Error(`session-sync: this machine does not hold session '${id}'`)
+    }
+    const ids = new Set(await this.selectionIds())
+    if (!ids.has(String(sessionId))) {
+      ids.add(String(sessionId))
+      await this.persistSelection(ids)
+      if (configuredSettings(this.getSettings())) this.requestCycle()
+    }
+    return this.selection()
+  }
+
+  /**
+   * Close synchronization for one session. It leaves the shared selection, so
+   * every machine stops syncing it; the local session file is never touched.
+   * @param id - the session id from the row menu.
+   * @returns the fresh selection tree.
+   */
+  async closeSession(id: string): Promise<import('./api.ts').SessionSyncSelectionView> {
+    const sessionId = requireSessionId(id)
+    const ids = new Set(await this.selectionIds())
+    if (ids.has(String(sessionId))) {
+      ids.delete(String(sessionId))
+      await this.persistSelection(ids)
+      if (configuredSettings(this.getSettings())) this.requestCycle()
+    }
+    return this.selection()
+  }
+
+  /**
+   * One session's synchronization records for the row menu's dialog.
+   * @param id - the session id.
+   * @returns its records, newest first.
+   */
+  async sessionRecords(id: string): Promise<SessionSyncRecord[]> {
+    const sessionId = requireSessionId(id)
+    const entries = await this.readRepoSelection()
+    const key = entries.find(entry => String(entry.id) === String(sessionId))?.key
+    if (key === undefined) return []
+    return [...await this.readRecords(key, String(sessionId))].reverse()
   }
 
   /**
@@ -614,6 +792,20 @@ export class SessionSyncService extends Service {
     if (this.inflight === undefined) this.startCycle()
   }
 
+  /**
+   * Launch a cycle for a user edit (selecting or closing a session). A cycle
+   * already running read this machine's selection before the edit landed, so
+   * one more pass is requested instead of dropping the edit until the next
+   * timer tick.
+   */
+  private requestCycle(): void {
+    if (this.inflight !== undefined) {
+      this.relaunchRequested = true
+      return
+    }
+    this.startCycle()
+  }
+
   /** Begin one cycle, tracking its promise and settlement. */
   private startCycle(): void {
     const promise = this.cycle()
@@ -621,6 +813,11 @@ export class SessionSyncService extends Service {
     void promise.finally(() => {
       /* v8 ignore next -- a new cycle cannot replace an unsettled in-flight promise: launch guards on it */
       if (this.inflight === promise) this.inflight = undefined
+      // A selection edit that arrived mid-cycle needs one more pass to publish.
+      if (this.relaunchRequested) {
+        this.relaunchRequested = false
+        this.launchIfIdle()
+      }
     })
   }
 
@@ -640,10 +837,7 @@ export class SessionSyncService extends Service {
       persistence: this.persistencePort(),
       ...workspacePort === undefined ? {} : { workspaces: workspacePort },
       ...projectionCachePort === undefined ? {} : { projectionCache: projectionCachePort },
-      fs: new RepoFilesystem(this.repoDir(), {
-        read: () => this.pinBaseline(),
-        write: snapshot => this.writePinBaseline(snapshot),
-      }),
+      fs: this.repoFilesystem(),
       git: {
         ensure: () => repository.ensure(settings.remote, settings.branch),
         fetch: () => repository.fetch(settings.branch),
@@ -666,14 +860,12 @@ export class SessionSyncService extends Service {
         pushed: result.pushed,
         archived: result.archived,
         deleted: result.deleted,
-        deletedUnpinned: result.deletedUnpinned,
-        pinned: result.pinned.length,
-        unpinned: result.unpinned.length,
+        deletedUnselected: result.deletedUnselected,
+        adopted: result.adopted.length,
+        dropped: result.dropped.length,
         conflicts: result.conflicts,
       }
-      // The cycle wrote this machine's applied pin state; drop the cached
-      // baseline so the watchdog compares against what the cycle just stored.
-      this.baselineLoaded = undefined
+      this.pendingWorkspaces = result.pending.map(entry => ({ ...entry, sessionIds: [...entry.sessionIds] }))
       // The periodic cleanup rides on the successful cycle: the worktree is
       // clean and freshly pushed, so the rewrite starts from the remote state.
       const cleanupDropped = await this.cleanupIfDue(settings)
@@ -685,9 +877,10 @@ export class SessionSyncService extends Service {
         pushed: result.pushed,
         archived: result.archived,
         deleted: result.deleted,
-        deletedUnpinned: result.deletedUnpinned,
-        pinned: result.pinned.length,
-        unpinned: result.unpinned.length,
+        deletedUnselected: result.deletedUnselected,
+        adopted: result.adopted.length,
+        dropped: result.dropped.length,
+        pending: result.pending.length,
         conflicts: result.conflicts,
         ...result.errors.length > 0 ? { errors: result.errors } : {},
         ...cleanupDropped > 0 ? { cleanupDropped } : {},
@@ -701,9 +894,10 @@ export class SessionSyncService extends Service {
         pushed: result.pushed,
         archived: result.archived,
         deleted: result.deleted,
-        deletedUnpinned: result.deletedUnpinned,
-        pinned: result.pinned.length,
-        unpinned: result.unpinned.length,
+        deletedUnselected: result.deletedUnselected,
+        adopted: result.adopted.length,
+        dropped: result.dropped.length,
+        pending: result.pending.length,
         conflicts: result.conflicts,
         lastSyncAt: this.lastSyncAt,
       })
@@ -733,6 +927,20 @@ export class SessionSyncService extends Service {
   /** Worktree directory under the harness home. */
   private repoDir(): string {
     return join(this.home, 'repo')
+  }
+
+  /**
+   * The worktree filesystem port, bound to this service's machine-local
+   * selection and anchor stores (which live outside the worktree, so they are
+   * never committed).
+   */
+  private repoFilesystem(): RepoFilesystem {
+    return new RepoFilesystem(this.repoDir(), {
+      readState: () => this.readState(),
+      writeState: state => this.writeState(state),
+      readLocalSelection: () => this.readLocalSelection(),
+      writeLocalSelection: selection => this.writeLocalSelection(selection),
+    })
   }
 
   /** Persistence port over `ctx.sessionPersistence`. */
@@ -782,15 +990,26 @@ export class SessionSyncService extends Service {
     const registry = this.ctx.get('workspaceRegistry')
     if (registry === undefined) return undefined
     return {
-      resolveByPath: path => registry.resolveByPath(path),
-      create: (path, title) => registry.create(path, title),
+      // The registry list is the matching table: a repo workspace's manifest
+      // name is resolved against these titles, and only a unique title places
+      // its sessions.
+      list: () => registry.list().map(workspace => ({
+        id: String(workspace.id),
+        title: workspace.title,
+        path: workspace.path,
+        attachSession: id => workspace.attachSession(id),
+      })),
+      resolveByPath: async (path) => {
+        const workspace = await registry.resolveByPath(path)
+        return workspace === undefined ? undefined : {
+          id: String(workspace.id),
+          title: workspace.title,
+          path: workspace.path,
+          attachSession: id => workspace.attachSession(id),
+        }
+      },
       archivedSessionIds: () => registry.archivedSessionIds,
       archiveSession: id => registry.archiveSession(id),
-      // The pin set is the sync selection; mirroring it is what makes a pin
-      // made on one machine select the session on every machine.
-      pinnedSessionIds: () => registry.pinnedSessionIds,
-      pinSession: id => registry.pinSession(id),
-      unpinSession: id => registry.unpinSession(id),
     }
   }
 
@@ -819,15 +1038,18 @@ class RepoFilesystem implements SyncFilesystem {
 
   /**
    * @param root - absolute worktree directory.
-   * @param baseline - machine-local pin-baseline store (outside the worktree,
-   * so it is never committed); the engine reads it to tell a local pin edit
-   * from a repo-side change and writes back what it applied.
+   * @param local - machine-local stores (outside the worktree, so they are
+   * never committed): the selection mirror the engine applies the repo's
+   * snapshot to, and the anchor that tells a local edit from a repo-side
+   * change.
    */
   constructor(
     private readonly root: string,
-    private readonly baseline: {
-      read(): Promise<PinSnapshot | undefined>
-      write(snapshot: PinSnapshot): Promise<void>
+    private readonly local: {
+      readState(): Promise<SyncState | undefined>
+      writeState(state: SyncState): Promise<void>
+      readLocalSelection(): Promise<LocalSelection | undefined>
+      writeLocalSelection(selection: LocalSelection): Promise<void>
     },
   ) {
     this.hostname = hostname()
@@ -886,18 +1108,20 @@ class RepoFilesystem implements SyncFilesystem {
     return this.listEntries(rel, false)
   }
 
-  async readPinBaseline(): Promise<PinSnapshot | undefined> {
-    return this.baseline.read()
+  readState(): Promise<SyncState | undefined> {
+    return this.local.readState()
   }
 
-  async writePinBaseline(snapshot: { firstSeen: boolean; sessionIds: readonly string[]; ownedIds: readonly string[] }): Promise<void> {
-    await this.baseline.write({
-      firstSeen: snapshot.firstSeen,
-      sessionIds: snapshot.sessionIds.map((raw: string) => SessionId(raw)),
-      ownedIds: snapshot.ownedIds.map((raw: string) => SessionId(raw)),
-      updatedAt: new Date().toISOString(),
-      host: this.hostname,
-    })
+  writeState(state: SyncState): Promise<void> {
+    return this.local.writeState(state)
+  }
+
+  readLocalSelection(): Promise<LocalSelection | undefined> {
+    return this.local.readLocalSelection()
+  }
+
+  writeLocalSelection(selection: LocalSelection): Promise<void> {
+    return this.local.writeLocalSelection(selection)
   }
 
   /** Directory or file names inside one repo-relative directory. */

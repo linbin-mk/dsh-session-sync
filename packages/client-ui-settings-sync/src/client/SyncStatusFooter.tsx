@@ -86,7 +86,7 @@ export function SyncStatusFooter({
   const lastSync = state.sync?.lastSyncAt
   // The selection size is what this plugin actually synchronizes, so the
   // footer names it beside the last sync instant.
-  const selected = state.sync.pinnedCount > 0 ? t('pinnedCount', { count: state.sync.pinnedCount }) : ''
+  const selected = state.sync.syncedCount > 0 ? t('syncedCount', { count: state.sync.syncedCount }) : ''
   const detail = [selected, lastSyncAtText(lastSync, t)].filter(part => part.length > 0).join(' · ')
 
   return (

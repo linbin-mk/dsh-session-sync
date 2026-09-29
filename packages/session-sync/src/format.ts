@@ -1,32 +1,40 @@
 /**
- * Portable repository format for session sync. The git worktree stores one
- * plaintext JSONL artifact per session under `projects/<key>/`. The first
- * line is this plugin's own versioned envelope; every remaining line is one
- * logical Session event. The envelope stores a portable project key instead
- * of a machine path. Machines replace it with their mapped local path on
- * import, so one repo serves hosts whose projects live at different absolute
- * paths and remains independent of a persistence backend's physical files.
+ * Portable repository format (v2) for session sync. The git worktree stores
+ * one plaintext JSONL artifact per session under `workspaces/<key>/`. The
+ * first line is this plugin's own versioned envelope; every remaining line is
+ * one logical Session event. The envelope stores the workspace's stable repo
+ * key instead of a machine path: importing machines resolve that key's
+ * manifest name to a local workspace and stamp its directory into the header,
+ * so one repo serves hosts whose projects live at different absolute paths.
  *
  * Layout:
  * ```text
- * manifest.json                    { "version": 1, "projects": ["demo", ...] }
- * pinned.json                      { "version": 1, "updatedAt", "host", "sessionIds": [...] }
- * projects/<key>/session-<id>.jsonl
- * projects/<key>/archived.json     { "version": 1, "sessionIds": ["session-...", ...] }
+ * sync.json                                  { version, updatedAt, host, entries: [...] }
+ * workspaces/<key>/manifest.json             { version, key, name, updatedAt }
+ * workspaces/<key>/session-<id>.jsonl
+ * workspaces/<key>/session-<id>.records.json { version, records: [...] }
+ * workspaces/<key>/archived.json             { version, sessionIds: [...] }
  * conflicts/<key>/<stem>-<host>.jsonl
  * ```
  *
- * `pinned.json` is the synchronization selection: pinned sessions are the only
- * ones an artifact is written for, on any machine, and it is also the pin set
- * every machine mirrors into its own registry. Every machine writes it as a
- * whole snapshot rather than merging, because unpinning has to propagate and a
- * union could never express a removal.
+ * `sync.json` is the cross-machine synchronization selection: exactly the
+ * sessions listed there are exported, on every machine. It is written as a
+ * whole snapshot rather than merged, because closing sync has to propagate and
+ * a union could never express a removal. Entries carry the workspace key, the
+ * workspace **name** (the only join key machines match on), a display title,
+ * and the adding host/time, so any machine can render the full selection tree
+ * without importing anything first — the artifact header itself carries no
+ * title.
+ *
+ * `manifest.json` is where a workspace's stable key meets its current display
+ * name. Machines match a repo workspace to a local one by comparing
+ * `manifest.name` with the local workspace title; the key never changes, so a
+ * rename only rewrites the name here.
  *
  * An archived session is retired from git: the engine deletes its
  * `session-<id>.jsonl` (the local log is untouched) while its id stays in the
- * project's grow-only `archived.json`, which is how machines that still hold
- * the session learn to hide it. The artifact may therefore exist only
- * transiently for an archived id — until the archiving machine's next cycle.
+ * workspace's grow-only `archived.json`, which is how machines that still hold
+ * the session learn to hide it.
  *
  * The artifact deliberately does not copy the JSONL backend's header, packed
  * rows, compression, or generation layout. Those are private storage choices;
@@ -44,16 +52,28 @@ import {
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 
 /** Version of the per-session portable artifact written by this plugin. */
-export const SYNC_ARTIFACT_VERSION = 1
+export const SYNC_ARTIFACT_VERSION = 2
 
-/** Manifest version this plugin writes and accepts. */
-export const SYNC_MANIFEST_VERSION = 1
+/** Selection-snapshot version this plugin writes and accepts (`sync.json`). */
+export const SYNC_SELECTION_VERSION = 2
 
-/** File name of the repo manifest. */
+/** Per-workspace manifest version this plugin writes and accepts. */
+export const SYNC_MANIFEST_VERSION = 2
+
+/** Per-session sync-record version this plugin writes and accepts. */
+export const SYNC_RECORDS_VERSION = 2
+
+/** Machine-local sync-anchor version this plugin writes and accepts. */
+export const SYNC_STATE_VERSION = 2
+
+/** Machine-local selection-mirror version this plugin writes and accepts. */
+export const SYNC_LOCAL_SELECTION_VERSION = 2
+
+/** Repo directory holding per-workspace session artifacts. */
+export const WORKSPACES_DIR = 'workspaces'
+
+/** File name of one workspace's manifest inside its directory. */
 export const MANIFEST_NAME = 'manifest.json'
-
-/** Repo directory holding per-project session artifacts. */
-export const PROJECTS_DIR = 'projects'
 
 /** Repo directory holding divergent-log copies (never imported). */
 export const CONFLICTS_DIR = 'conflicts'
@@ -61,48 +81,114 @@ export const CONFLICTS_DIR = 'conflicts'
 /** Archive-list version this plugin writes and accepts. */
 export const SYNC_ARCHIVE_VERSION = 1
 
-/** File name of one project's archived-session list inside its directory. */
+/** File name of one workspace's archived-session list inside its directory. */
 export const ARCHIVE_NAME = 'archived.json'
 
-/** Pin-list version this plugin writes and accepts. */
-export const SYNC_PIN_VERSION = 1
+/** File name of the repo-level synchronization selection. */
+export const SELECTION_NAME = 'sync.json'
 
-/** File name of the repo pin list at the worktree root. */
-export const PIN_NAME = 'pinned.json'
+/** How many sync records one session keeps; the oldest are dropped. */
+export const SYNC_RECORD_LIMIT = 20
 
-/** Snapshot version this plugin writes and accepts for its machine-local pin baseline. */
-export const SYNC_PIN_SNAPSHOT_VERSION = 1
+/** One workspace manifest: the stable repo key and the current display name. */
+export interface WorkspaceManifest {
+  /** Stable repo directory key, minted once and never rewritten. */
+  key: string
+  /** Display name the local workspace title is matched against. */
+  name: string
+  /** ISO-8601 instant this manifest was last written. */
+  updatedAt: string
+}
+
+/** One session selected for synchronization, as the repo snapshot records it. */
+export interface SyncSelectionEntry {
+  /** Selected session id. */
+  id: SessionId
+  /** Repo key of the workspace the session belongs to. */
+  key: string
+  /** Workspace display name on the adding machine — the matching join key. */
+  workspaceName: string
+  /** Session title at the last publish, for rendering without an import. */
+  title: string
+  /** ISO-8601 instant the session was added to the selection. */
+  addedAt: string
+  /** Hostname that added it (diagnostics and display). */
+  addedBy: string
+}
+
+/** Decoded `sync.json`: the authoritative cross-machine synchronization selection. */
+export interface SyncSelection {
+  /** Hostname that published this revision (diagnostics only). */
+  host: string
+  /** ISO-8601 instant that machine published it (diagnostics only). */
+  updatedAt: string
+  /** Selected sessions, in stored order. */
+  entries: SyncSelectionEntry[]
+}
+
+/** Direction of one recorded synchronization of a session. */
+export type SyncRecordDirection = 'push' | 'pull'
+
+/** Outcome of one recorded synchronization of a session. */
+export type SyncRecordResult = 'ok' | 'conflict'
+
+/** One machine's record of synchronizing one session. */
+export interface SessionSyncRecord {
+  /** Hostname that performed the synchronization. */
+  host: string
+  /** ISO-8601 instant it happened. */
+  at: string
+  /** Whether that machine uploaded its log or downloaded one. */
+  direction: SyncRecordDirection
+  /** Logical events carried by that transfer. */
+  events: number
+  /** How the transfer ended. */
+  result: SyncRecordResult
+}
+
+/** Decoded `session-<id>.records.json`: one session's sync history, newest kept. */
+export interface SessionSyncRecords {
+  /** Records in stored order (oldest first). */
+  records: SessionSyncRecord[]
+}
 
 /**
- * One machine's last synced pin state: the anchor that separates a local pin
- * edit from a repo-side change. `firstSeen` records whether this machine ever
- * completed a cycle — before that, an empty local pin set is a fresh machine,
- * not a deliberate "unpin everything", so nothing may be published or swept.
- * `ownedIds` records the pins this machine may drop from the repo's selection:
- * an id it never owned is another machine's pin, which a local edit here must
- * not remove.
+ * Machine-local synchronization anchor. `syncedIds` is the selection this
+ * machine last agreed with the repo, and `ownedIds` the entries it may remove;
+ * together they separate "you edited the selection here" from "another machine
+ * edited the repo". `firstSeen` records whether this machine ever completed a
+ * cycle: before that, an empty local selection means a fresh machine, not a
+ * deliberate "close everything", so nothing may be published or swept.
+ * `workspaceKeys` is the local workspace-id → repo-key table that keeps a repo
+ * directory stable when its workspace is renamed.
  */
-export interface PinSnapshot {
+export interface SyncState {
   /** Whether this machine has completed at least one cycle. */
   firstSeen: boolean
-  /** Session ids of the last synced pin state (repo order as read, sorted on write). */
-  sessionIds: SessionId[]
+  /** Session ids of the last synced selection (sorted on write). */
+  syncedIds: SessionId[]
   /** Session ids this machine may drop from the selection (sorted on write). */
   ownedIds: SessionId[]
-  /** ISO-8601 instant this snapshot was written. */
+  /** Local workspace-id → repo key assignments. */
+  workspaceKeys: WorkspaceKeyAssignment[]
+  /** ISO-8601 instant this state was written. */
   updatedAt: string
   /** Hostname that wrote it (diagnostics only). */
   host: string
 }
 
-/** Decoded repo pin list: the authoritative cross-machine sync selection. */
-export interface PinList {
-  /** Session ids the repo currently selects for synchronization. */
+/** One local workspace's stable repo directory key. */
+export interface WorkspaceKeyAssignment {
+  /** Local workspace id (a stable uuid). */
+  workspaceId: string
+  /** Repo directory key holding that workspace's artifacts. */
+  key: string
+}
+
+/** Machine-local mirror of the selection this machine currently holds. */
+export interface LocalSelection {
+  /** Selected session ids (sorted on write). */
   sessionIds: SessionId[]
-  /** Hostname that published this revision (diagnostics only). */
-  host: string
-  /** ISO-8601 instant that machine published it (diagnostics only). */
-  updatedAt: string
 }
 
 /** Parsed portable artifact: the header plus its decoded event log. */
@@ -119,7 +205,7 @@ export interface PortableSession {
 interface ParsedArtifactLine {
   type: 'dsh-session-sync'
   version: typeof SYNC_ARTIFACT_VERSION
-  project: string
+  workspace: string
   inheritedEventCount: number
   session: {
     version: typeof SESSION_FORMAT_VERSION
@@ -144,6 +230,16 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && !Object.is(value, -0)
 }
 
+/** Whether a value is a non-empty string. */
+function isNonBlankString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0
+}
+
+/** Whether a value is an ISO-8601 instant string. */
+function isIsoInstant(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && !Number.isNaN(Date.parse(value))
+}
+
 /** Shape-check one parsed header line, rejecting anything a persistence backend would refuse. */
 function parseHeaderLine(parsed: unknown): ParsedArtifactLine {
   if (typeof parsed !== 'object' || parsed === null) {
@@ -154,10 +250,12 @@ function parseHeaderLine(parsed: unknown): ParsedArtifactLine {
     throw new Error('portable session artifact: first line is not a session-sync header')
   }
   if (line.version !== SYNC_ARTIFACT_VERSION) {
-    throw new Error(`portable session artifact: unsupported artifact version ${String(line.version)}`)
+    throw new Error(
+      `portable session artifact: unsupported artifact version ${String(line.version)} (this plugin writes version ${SYNC_ARTIFACT_VERSION})`,
+    )
   }
-  if (typeof line.project !== 'string' || line.project.length === 0) {
-    throw new Error('portable session artifact: project key is invalid')
+  if (!isNonBlankString(line.workspace)) {
+    throw new Error('portable session artifact: workspace key is invalid')
   }
   if (!isNonNegativeSafeInteger(line.inheritedEventCount)) {
     throw new Error('portable session artifact: inheritedEventCount is invalid')
@@ -223,7 +321,7 @@ function splitArtifact(text: string): { headerText: string; rowsText: string } {
 /**
  * Serialize one logical Session into the portable JSONL format.
  * @param session - current logical header, inherited cut, and events.
- * @param key - portable project key stored in place of the local cwd.
+ * @param key - stable workspace key stored in place of the local cwd.
  * @returns canonical artifact text with one event per line.
  */
 export function serializePortableSession(session: PortableSession, key: string): string {
@@ -234,7 +332,7 @@ export function serializePortableSession(session: PortableSession, key: string):
   const header = {
     type: 'dsh-session-sync',
     version: SYNC_ARTIFACT_VERSION,
-    project: key,
+    workspace: key,
     inheritedEventCount,
     session: {
       version: meta.version,
@@ -253,12 +351,12 @@ export function serializePortableSession(session: PortableSession, key: string):
 /**
  * Parse a portable artifact into a header and a contiguous decoded event log.
  * The header `cwd` is replaced with `path` — the importing machine's local
- * directory — so the public persistence service creates it in the right
- * workspace. Event rows contain logical events; invalid envelopes, unknown
- * required event types, seq gaps, duplicates, or a broken tail reject the
- * whole artifact instead of importing a corrupt log.
+ * workspace directory — so the public persistence service creates the session
+ * in the right workspace. Event rows contain logical events; invalid
+ * envelopes, unknown required event types, seq gaps, duplicates, or a broken
+ * tail reject the whole artifact instead of importing a corrupt log.
  * @param text - raw artifact text (header line first).
- * @param path - local directory to stamp into the header.
+ * @param path - local workspace directory to stamp into the header.
  * @returns the parsed portable session.
  */
 export function parsePortableSession(text: string, path: string): PortableSession {
@@ -324,9 +422,19 @@ function encodeRepoSegment(raw: string): string {
   return out
 }
 
-/** Repo-relative path of one session artifact, `projects/<key>/<id>.jsonl`. */
+/** Repo-relative directory of one workspace. */
+export function workspaceRepoDir(key: string): string {
+  return `${WORKSPACES_DIR}/${encodeRepoSegment(key)}`
+}
+
+/** Repo-relative path of one session artifact, `workspaces/<key>/session-<id>.jsonl`. */
 export function sessionRepoPath(key: string, id: SessionId): string {
-  return `${PROJECTS_DIR}/${encodeRepoSegment(key)}/${encodeRepoSegment(String(id))}.jsonl`
+  return `${workspaceRepoDir(key)}/${encodeRepoSegment(String(id))}.jsonl`
+}
+
+/** Repo-relative path of one session's sync records, `workspaces/<key>/session-<id>.records.json`. */
+export function recordsRepoPath(key: string, id: SessionId): string {
+  return `${workspaceRepoDir(key)}/${encodeRepoSegment(String(id))}.records.json`
 }
 
 /** Repo-relative path of one conflict copy, `conflicts/<key>/<id>-<host>.jsonl`. */
@@ -334,20 +442,25 @@ export function conflictRepoPath(key: string, id: SessionId, host: string): stri
   return `${CONFLICTS_DIR}/${encodeRepoSegment(key)}/${encodeRepoSegment(String(id))}-${encodeRepoSegment(host)}.jsonl`
 }
 
-/** Repo-relative path of one project's archive list, `projects/<key>/archived.json`. */
+/** Repo-relative path of one workspace's archive list, `workspaces/<key>/archived.json`. */
 export function archiveRepoPath(key: string): string {
-  return `${PROJECTS_DIR}/${encodeRepoSegment(key)}/${ARCHIVE_NAME}`
+  return `${workspaceRepoDir(key)}/${ARCHIVE_NAME}`
 }
 
-/** Repo-relative path of the pin list, `pinned.json` at the worktree root. */
-export function pinRepoPath(): string {
-  return PIN_NAME
+/** Repo-relative path of one workspace's manifest, `workspaces/<key>/manifest.json`. */
+export function manifestRepoPath(key: string): string {
+  return `${workspaceRepoDir(key)}/${MANIFEST_NAME}`
+}
+
+/** Repo-relative path of the synchronization selection, `sync.json` at the worktree root. */
+export function selectionRepoPath(): string {
+  return SELECTION_NAME
 }
 
 /**
  * Decode the session id from a repo artifact file name (`<id>.jsonl`, with
  * `id` carrying its own `session-` prefix).
- * @param filename - the artifact's base name inside a project directory.
+ * @param filename - the artifact's base name inside a workspace directory.
  * @returns the branded id, or `undefined` when the name does not carry one.
  */
 export function sessionIdFromFilename(filename: string): SessionId | undefined {
@@ -358,17 +471,222 @@ export function sessionIdFromFilename(filename: string): SessionId | undefined {
   return id === undefined ? undefined : SessionId(id)
 }
 
-/** Serialize the repo manifest. */
-export function serializeManifest(projects: readonly string[]): string {
-  return JSON.stringify({ version: SYNC_MANIFEST_VERSION, projects: [...projects].sort() }) + '\n'
+/** Serialize one workspace manifest. */
+export function serializeManifest(manifest: WorkspaceManifest): string {
+  return JSON.stringify({
+    version: SYNC_MANIFEST_VERSION,
+    key: manifest.key,
+    name: manifest.name,
+    updatedAt: manifest.updatedAt,
+  }) + '\n'
 }
 
 /**
- * Parse a project archive-list artifact into branded session ids. The list is
- * the repo's record of which project sessions were archived on any machine —
- * a grow-only set (the harness archive has no unarchive path), so readers
- * union it into their own registry set. Malformed shapes reject instead of
- * silently hiding sessions.
+ * Parse one workspace manifest. The name is the only join key machines match
+ * on, so a manifest that cannot supply it rejects rather than importing the
+ * workspace's sessions into an arbitrary local workspace.
+ * @param text - raw manifest text.
+ * @param expectedKey - the directory key the manifest was read from.
+ * @returns the decoded manifest.
+ */
+export function parseManifest(text: string, expectedKey: string): WorkspaceManifest {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new Error('workspace manifest: not valid JSON')
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('workspace manifest: not a JSON object')
+  }
+  const manifest = parsed as Partial<{ version: unknown; key: unknown; name: unknown; updatedAt: unknown }>
+  if (manifest.version !== SYNC_MANIFEST_VERSION) {
+    throw new Error(`workspace manifest: unsupported version ${String(manifest.version)}`)
+  }
+  if (manifest.key !== expectedKey) {
+    throw new Error(`workspace manifest: key ${JSON.stringify(manifest.key)} does not match its directory ${JSON.stringify(expectedKey)}`)
+  }
+  if (!isNonBlankString(manifest.name)) {
+    throw new Error('workspace manifest: name is not a non-empty string')
+  }
+  if (!isIsoInstant(manifest.updatedAt)) {
+    throw new Error('workspace manifest: updatedAt is not an ISO-8601 instant')
+  }
+  return { key: manifest.key, name: manifest.name, updatedAt: manifest.updatedAt }
+}
+
+/**
+ * Parse the repo synchronization selection. Malformed shapes reject instead of
+ * silently emptying the selection: an empty selection would stop every sync
+ * and retire every artifact.
+ * @param text - raw `sync.json` text.
+ * @returns the decoded selection.
+ */
+export function parseSelection(text: string): SyncSelection {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new Error('selection: not valid JSON')
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('selection: not a JSON object')
+  }
+  const selection = parsed as Partial<{ version: unknown; host: unknown; updatedAt: unknown; entries: unknown }>
+  if (selection.version !== SYNC_SELECTION_VERSION) {
+    throw new Error(`selection: unsupported version ${String(selection.version)}`)
+  }
+  if (!isNonBlankString(selection.host)) {
+    throw new Error('selection: host is not a string')
+  }
+  if (!isIsoInstant(selection.updatedAt)) {
+    throw new Error('selection: updatedAt is not an ISO-8601 instant')
+  }
+  if (!Array.isArray(selection.entries)) {
+    throw new Error('selection: entries is not an array')
+  }
+  const entries: SyncSelectionEntry[] = []
+  const seen = new Set<string>()
+  for (const raw of selection.entries) {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+      throw new Error('selection: entry is not a JSON object')
+    }
+    const entry = raw as Partial<Record<keyof SyncSelectionEntry, unknown>>
+    if (typeof entry.id !== 'string' || !SESSION_ID_PATTERN.test(entry.id)) {
+      throw new Error(`selection: invalid session id ${JSON.stringify(entry.id)}`)
+    }
+    if (!isNonBlankString(entry.key)) throw new Error(`selection: invalid workspace key for ${entry.id}`)
+    if (!isNonBlankString(entry.workspaceName)) throw new Error(`selection: invalid workspace name for ${entry.id}`)
+    if (typeof entry.title !== 'string') throw new Error(`selection: invalid title for ${entry.id}`)
+    if (!isIsoInstant(entry.addedAt)) throw new Error(`selection: invalid addedAt for ${entry.id}`)
+    if (!isNonBlankString(entry.addedBy)) throw new Error(`selection: invalid addedBy for ${entry.id}`)
+    if (seen.has(entry.id)) throw new Error(`selection: duplicate session id ${entry.id}`)
+    seen.add(entry.id)
+    entries.push({
+      id: SessionId(entry.id),
+      key: entry.key,
+      workspaceName: entry.workspaceName,
+      title: entry.title,
+      addedAt: entry.addedAt,
+      addedBy: entry.addedBy,
+    })
+  }
+  return { host: selection.host, updatedAt: selection.updatedAt, entries }
+}
+
+/** Serialize the repo selection canonically: stable id order, versioned, attributed. */
+export function serializeSelection(selection: SyncSelection): string {
+  const entries = [...selection.entries]
+    .sort((left, right) => String(left.id) < String(right.id) ? -1 : String(left.id) > String(right.id) ? 1 : 0)
+    .map(entry => ({
+      id: String(entry.id),
+      key: entry.key,
+      workspaceName: entry.workspaceName,
+      title: entry.title,
+      addedAt: entry.addedAt,
+      addedBy: entry.addedBy,
+    }))
+  return JSON.stringify({
+    version: SYNC_SELECTION_VERSION,
+    updatedAt: selection.updatedAt,
+    host: selection.host,
+    entries,
+  }) + '\n'
+}
+
+/**
+ * Parse one session's sync records. Records are display data — the dialog the
+ * menu opens — so a malformed file rejects for the caller to report rather
+ * than silently dropping history.
+ * @param text - raw records text.
+ * @returns the decoded records, oldest first.
+ */
+export function parseRecords(text: string): SessionSyncRecords {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new Error('session records: not valid JSON')
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('session records: not a JSON object')
+  }
+  const records = parsed as Partial<{ version: unknown; records: unknown }>
+  if (records.version !== SYNC_RECORDS_VERSION) {
+    throw new Error(`session records: unsupported version ${String(records.version)}`)
+  }
+  if (!Array.isArray(records.records)) {
+    throw new Error('session records: records is not an array')
+  }
+  const decoded: SessionSyncRecord[] = []
+  for (const raw of records.records) {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+      throw new Error('session records: record is not a JSON object')
+    }
+    const record = raw as Partial<Record<keyof SessionSyncRecord, unknown>>
+    if (!isNonBlankString(record.host)) throw new Error('session records: invalid host')
+    if (!isIsoInstant(record.at)) throw new Error('session records: invalid at')
+    if (record.direction !== 'push' && record.direction !== 'pull') {
+      throw new Error(`session records: invalid direction ${JSON.stringify(record.direction)}`)
+    }
+    if (!isNonNegativeSafeInteger(record.events)) throw new Error('session records: invalid events')
+    if (record.result !== 'ok' && record.result !== 'conflict') {
+      throw new Error(`session records: invalid result ${JSON.stringify(record.result)}`)
+    }
+    decoded.push({
+      host: record.host,
+      at: record.at,
+      direction: record.direction,
+      events: record.events,
+      result: record.result,
+    })
+  }
+  return { records: decoded }
+}
+
+/** Serialize one session's records canonically, keeping the newest entries up to the cap. */
+export function serializeRecords(records: SessionSyncRecords): string {
+  const kept = records.records.slice(Math.max(0, records.records.length - SYNC_RECORD_LIMIT))
+  return JSON.stringify({
+    version: SYNC_RECORDS_VERSION,
+    records: kept.map(record => ({
+      host: record.host,
+      at: record.at,
+      direction: record.direction,
+      events: record.events,
+      result: record.result,
+    })),
+  }) + '\n'
+}
+
+/**
+ * Merge freshly observed records into the ones already stored, newest last.
+ * The key is `(host, at, direction)`: a record is something a machine did, and
+ * re-reading the same file must not duplicate it. `conflict`/`skipped` results
+ * are not pre-empted by a later `ok` — both are real history.
+ * @param existing - records already stored.
+ * @param incoming - records observed this cycle.
+ * @returns the merged list, oldest first, capped at {@link SYNC_RECORD_LIMIT}.
+ */
+export function mergeRecords(
+  existing: readonly SessionSyncRecord[],
+  incoming: readonly SessionSyncRecord[],
+): SessionSyncRecord[] {
+  const key = (record: SessionSyncRecord): string => `${record.host}\u0000${record.at}\u0000${record.direction}`
+  const byKey = new Map<string, SessionSyncRecord>()
+  for (const record of [...existing, ...incoming]) byKey.set(key(record), record)
+  const merged = [...byKey.values()].sort((left, right) => {
+    if (left.at === right.at) return 0
+    return left.at < right.at ? -1 : 1
+  })
+  return merged.slice(Math.max(0, merged.length - SYNC_RECORD_LIMIT))
+}
+
+/**
+ * Parse a workspace archive-list artifact into branded session ids. The list is
+ * the repo's record of which workspace sessions were archived on any machine —
+ * a grow-only set, so readers union it into their own registry set. Malformed
+ * shapes reject instead of silently hiding sessions.
  * @param text - raw archive-list artifact text.
  * @returns the archived session ids in stored order.
  */
@@ -377,153 +695,162 @@ export function parseArchiveList(text: string): SessionId[] {
   try {
     parsed = JSON.parse(text)
   } catch {
-    throw new Error('project archive list: not valid JSON')
+    throw new Error('workspace archive list: not valid JSON')
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new Error('project archive list: not a JSON object')
+    throw new Error('workspace archive list: not a JSON object')
   }
   const list = parsed as Partial<{ version: unknown; sessionIds: unknown }>
   if (list.version !== SYNC_ARCHIVE_VERSION) {
-    throw new Error(`project archive list: unsupported version ${String(list.version)}`)
+    throw new Error(`workspace archive list: unsupported version ${String(list.version)}`)
   }
   if (!Array.isArray(list.sessionIds)) {
-    throw new Error('project archive list: sessionIds is not an array')
+    throw new Error('workspace archive list: sessionIds is not an array')
   }
   const ids: SessionId[] = []
   for (const entry of list.sessionIds) {
     if (typeof entry !== 'string' || !SESSION_ID_PATTERN.test(entry)) {
-      throw new Error(`project archive list: invalid session id ${JSON.stringify(entry)}`)
+      throw new Error(`workspace archive list: invalid session id ${JSON.stringify(entry)}`)
     }
     ids.push(SessionId(entry))
   }
   return ids
 }
 
-/** Serialize a project archive list canonically: sorted, deduplicated, versioned. */
+/** Serialize a workspace archive list canonically: sorted, deduplicated, versioned. */
 export function serializeArchiveList(ids: readonly SessionId[]): string {
   const unique = [...new Set(ids.map(String))].sort()
   return JSON.stringify({ version: SYNC_ARCHIVE_VERSION, sessionIds: unique }) + '\n'
 }
 
 /**
- * Parse the repo pin list. It holds the cross-machine synchronization
- * selection — the pinned sessions every machine mirrors and syncs — plus the
- * publishing host and instant for diagnostics; malformed shapes reject
- * instead of silently emptying the selection (an empty selection would stop
- * every sync and sweep every artifact).
- * @param text - raw pin-list artifact text.
- * @returns the decoded pin list.
- */
-export function parsePinList(text: string): PinList {  let parsed: unknown
-  try {
-    parsed = JSON.parse(text)
-  } catch {
-    throw new Error('pin list: not valid JSON')
-  }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new Error('pin list: not a JSON object')
-  }
-  const list = parsed as Partial<{ version: unknown; sessionIds: unknown; host: unknown; updatedAt: unknown }>
-  if (list.version !== SYNC_PIN_VERSION) {
-    throw new Error(`pin list: unsupported version ${String(list.version)}`)
-  }
-  if (!Array.isArray(list.sessionIds)) {
-    throw new Error('pin list: sessionIds is not an array')
-  }
-  if (typeof list.host !== 'string') {
-    throw new Error('pin list: host is not a string')
-  }
-  if (typeof list.updatedAt !== 'string') {
-    throw new Error('pin list: updatedAt is not a string')
-  }
-  const sessionIds: SessionId[] = []
-  for (const entry of list.sessionIds) {
-    if (typeof entry !== 'string' || !SESSION_ID_PATTERN.test(entry)) {
-      throw new Error(`pin list: invalid session id ${JSON.stringify(entry)}`)
-    }
-    sessionIds.push(SessionId(entry))
-  }
-  return { sessionIds, host: list.host, updatedAt: list.updatedAt }
-}
-
-/** Serialize the repo pin list canonically: sorted, deduplicated, versioned, attributed. */
-export function serializePinList(pinned: PinList): string {
-  const unique = [...new Set(pinned.sessionIds.map(String))].sort()
-  return JSON.stringify({
-    version: SYNC_PIN_VERSION,
-    updatedAt: pinned.updatedAt,
-    host: pinned.host,
-    sessionIds: unique,
-  }) + '\n'
-}
-
-/**
- * Parse this machine's pin baseline. Unlike the repo artifacts this file is
- * machine-local recovery state, not shared data: a missing file is the
+ * Parse this machine's synchronization anchor. Unlike the repo artifacts this
+ * file is machine-local recovery state, not shared data: a missing file is the
  * ordinary fresh state (handled by the caller), but an unreadable one is a
  * real fault, because guessing it would decide between publishing this
- * machine's pins and adopting the repo's.
- * @param text - raw snapshot text.
- * @returns the decoded snapshot.
+ * machine's edits and adopting the repo's.
+ * @param text - raw state text.
+ * @returns the decoded state.
  */
-export function parsePinSnapshot(text: string): PinSnapshot {
+export function parseState(text: string): SyncState {
   let parsed: unknown
   try {
     parsed = JSON.parse(text)
   } catch {
-    throw new Error('pin snapshot: not valid JSON')
+    throw new Error('sync state: not valid JSON')
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new Error('pin snapshot: not a JSON object')
+    throw new Error('sync state: not a JSON object')
   }
-  const snapshot = parsed as Partial<{
-    version: unknown; firstSeen: unknown; sessionIds: unknown; ownedIds: unknown
-    host: unknown; updatedAt: unknown
+  const state = parsed as Partial<{
+    version: unknown; firstSeen: unknown; syncedIds: unknown; ownedIds: unknown
+    workspaceKeys: unknown; host: unknown; updatedAt: unknown
   }>
-  if (snapshot.version !== SYNC_PIN_SNAPSHOT_VERSION) {
-    throw new Error(`pin snapshot: unsupported version ${String(snapshot.version)}`)
+  if (state.version !== SYNC_STATE_VERSION) {
+    throw new Error(`sync state: unsupported version ${String(state.version)}`)
   }
-  if (typeof snapshot.firstSeen !== 'boolean') {
-    throw new Error('pin snapshot: firstSeen is not a boolean')
+  if (typeof state.firstSeen !== 'boolean') {
+    throw new Error('sync state: firstSeen is not a boolean')
   }
-  if (!Array.isArray(snapshot.sessionIds)) {
-    throw new Error('pin snapshot: sessionIds is not an array')
+  if (!Array.isArray(state.syncedIds)) {
+    throw new Error('sync state: syncedIds is not an array')
   }
-  if (!Array.isArray(snapshot.ownedIds)) {
-    throw new Error('pin snapshot: ownedIds is not an array')
+  if (!Array.isArray(state.ownedIds)) {
+    throw new Error('sync state: ownedIds is not an array')
   }
-  if (typeof snapshot.host !== 'string') {
-    throw new Error('pin snapshot: host is not a string')
+  if (!Array.isArray(state.workspaceKeys)) {
+    throw new Error('sync state: workspaceKeys is not an array')
   }
-  if (typeof snapshot.updatedAt !== 'string') {
-    throw new Error('pin snapshot: updatedAt is not a string')
+  if (!isNonBlankString(state.host)) {
+    throw new Error('sync state: host is not a string')
+  }
+  if (!isIsoInstant(state.updatedAt)) {
+    throw new Error('sync state: updatedAt is not an ISO-8601 instant')
   }
   const ids = (value: unknown[], label: string): SessionId[] =>
     value.map(entry => {
       if (typeof entry !== 'string' || !SESSION_ID_PATTERN.test(entry)) {
-        throw new Error(`pin snapshot: invalid ${label} id ${JSON.stringify(entry)}`)
+        throw new Error(`sync state: invalid ${label} id ${JSON.stringify(entry)}`)
       }
       return SessionId(entry)
     })
+  const workspaceKeys: WorkspaceKeyAssignment[] = state.workspaceKeys.map(raw => {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+      throw new Error('sync state: workspace key entry is not a JSON object')
+    }
+    const assignment = raw as Partial<Record<keyof WorkspaceKeyAssignment, unknown>>
+    if (!isNonBlankString(assignment.workspaceId)) {
+      throw new Error('sync state: workspace key entry has no workspaceId')
+    }
+    if (!isNonBlankString(assignment.key)) {
+      throw new Error('sync state: workspace key entry has no key')
+    }
+    return { workspaceId: assignment.workspaceId, key: assignment.key }
+  })
   return {
-    firstSeen: snapshot.firstSeen,
-    sessionIds: ids(snapshot.sessionIds, 'session'),
-    ownedIds: ids(snapshot.ownedIds, 'owned'),
-    host: snapshot.host,
-    updatedAt: snapshot.updatedAt,
+    firstSeen: state.firstSeen,
+    syncedIds: ids(state.syncedIds, 'synced'),
+    ownedIds: ids(state.ownedIds, 'owned'),
+    workspaceKeys,
+    host: state.host,
+    updatedAt: state.updatedAt,
   }
 }
 
-/** Serialize the machine-local pin baseline canonically: sorted, deduplicated, versioned. */
-export function serializePinSnapshot(snapshot: PinSnapshot): string {
+/** Serialize the machine-local synchronization anchor canonically. */
+export function serializeState(state: SyncState): string {
   const unique = (values: readonly SessionId[]): string[] => [...new Set(values.map(String))].sort()
   return JSON.stringify({
-    version: SYNC_PIN_SNAPSHOT_VERSION,
-    firstSeen: snapshot.firstSeen,
-    updatedAt: snapshot.updatedAt,
-    host: snapshot.host,
-    sessionIds: unique(snapshot.sessionIds),
-    ownedIds: unique(snapshot.ownedIds),
+    version: SYNC_STATE_VERSION,
+    firstSeen: state.firstSeen,
+    updatedAt: state.updatedAt,
+    host: state.host,
+    syncedIds: unique(state.syncedIds),
+    ownedIds: unique(state.ownedIds),
+    workspaceKeys: [...state.workspaceKeys]
+      .map(entry => ({ workspaceId: entry.workspaceId, key: entry.key }))
+      .sort((left, right) => left.workspaceId < right.workspaceId ? -1 : left.workspaceId > right.workspaceId ? 1 : 0),
+  }) + '\n'
+}
+
+/**
+ * Parse this machine's selection mirror. Machine-local and disposable: losing
+ * it is safe (the next cycle adopts the repo's selection), but an unreadable
+ * one rejects so the caller can report instead of silently dropping edits.
+ * @param text - raw selection-mirror text.
+ * @returns the decoded mirror.
+ */
+export function parseLocalSelection(text: string): LocalSelection {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new Error('local selection: not valid JSON')
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('local selection: not a JSON object')
+  }
+  const selection = parsed as Partial<{ version: unknown; sessionIds: unknown }>
+  if (selection.version !== SYNC_LOCAL_SELECTION_VERSION) {
+    throw new Error(`local selection: unsupported version ${String(selection.version)}`)
+  }
+  if (!Array.isArray(selection.sessionIds)) {
+    throw new Error('local selection: sessionIds is not an array')
+  }
+  const sessionIds = selection.sessionIds.map(entry => {
+    if (typeof entry !== 'string' || !SESSION_ID_PATTERN.test(entry)) {
+      throw new Error(`local selection: invalid session id ${JSON.stringify(entry)}`)
+    }
+    return SessionId(entry)
+  })
+  return { sessionIds }
+}
+
+/** Serialize the machine-local selection mirror canonically: sorted and deduplicated. */
+export function serializeLocalSelection(selection: LocalSelection): string {
+  return JSON.stringify({
+    version: SYNC_LOCAL_SELECTION_VERSION,
+    sessionIds: [...new Set(selection.sessionIds.map(String))].sort(),
   }) + '\n'
 }
 

@@ -253,9 +253,16 @@ export class GitRepository {
    * Push the configured branch. The first push sets upstream so later pushes
    * run without `-u`; a non-fast-forward rejection surfaces as a GitError and
    * the next cycle refetches and retries.
+   *
+   * An unborn branch is a no-op rather than a failure: a cycle that had nothing
+   * to write — a freshly enabled machine whose selection is still empty —
+   * leaves the worktree without a commit, and `push -u origin <branch>` would
+   * fail on a refspec that does not exist yet. Nothing is publishable in that
+   * state, so the cycle ends clean instead of reporting a spurious error.
    * @param branch - branch to push.
    */
   async push(branch: string): Promise<void> {
+    if (await this.commitCount() === 0) return
     await this.runRemote(['push', '-u', 'origin', branch])
   }
 

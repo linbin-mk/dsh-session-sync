@@ -1,15 +1,14 @@
 /**
  * Draft-and-save model for the sync settings form. The section used to commit
  * every edit on change (text fields on blur), which made a half-typed value a
- * write the host could refuse — and made adding a second project mapping
- * impossible, because the new row arrived at the host already carrying the
- * first row's path, so every add collided with it. Here the page keeps one
- * draft, computes a patch of exactly the changed fields, validates locally
- * with the same rules the host enforces, and writes once when the user saves.
+ * write the host could refuse. Here the page keeps one draft, computes a patch
+ * of exactly the changed fields, validates locally with the same rules the
+ * host enforces, and writes once when the user saves.
  *
  * `settingsSignature` is the canonical text of the values a patch may change,
  * so "changed" costs one template string and stays correct for the nested
- * values (the cleanup block, the mapping list).
+ * cleanup block. v2 removed the project-mapping list: what synchronizes is the
+ * explicit session selection, which is not a settings field at all.
  * @module @linbin-mk/dsh-client-ui-settings-sync/settings-form
  */
 
@@ -18,7 +17,7 @@ import type { SyncSettingsDraft } from './controller.ts'
 /** One settled validation message; `field` is the control it belongs to. */
 export interface ValidationIssue {
   /** Field the message is about. */
-  field: 'remote' | 'branch' | 'interval' | 'mappings'
+  field: 'remote' | 'branch' | 'interval'
   /** Already-localized message. */
   message: string
 }
@@ -29,14 +28,6 @@ export interface ValidationCopy {
   remoteRequired: string
   /** The branch field is blank. */
   branchBlank: string
-  /** Every mapping row needs a key. */
-  mappingKeyBlank: (row: number) => string
-  /** Every mapping row needs a directory. */
-  mappingPathBlank: (row: number) => string
-  /** Two rows use the same key. */
-  mappingKeyDuplicate: (key: string) => string
-  /** Two rows use the same directory. */
-  mappingPathDuplicate: (path: string) => string
   /** The cadence is not a positive whole number of minutes. */
   intervalInvalid: string
 }
@@ -46,11 +37,10 @@ export interface ValidationCopy {
  * form of the text fields: the host stores trimmed values, so `" main "` and
  * `"main"` are the same setting and a stray space must not read as an edit the
  * user still has to save.
+ * @param settings - the section to canonicalize.
+ * @returns the canonical text.
  */
 export function settingsSignature(settings: SyncSettingsDraft): string {
-  const mappings = settings.mappings
-    .map(mapping => `${mapping.key.trim()}\u0000${mapping.path.trim()}`)
-    .join('\u0001')
   const { cleanup } = settings
   return [
     settings.enabled,
@@ -60,24 +50,23 @@ export function settingsSignature(settings: SyncSettingsDraft): string {
     cleanup.enabled,
     cleanup.periodHours,
     cleanup.keepCommits,
-    mappings,
   ].join('\u0002')
 }
 
-/** Whether the draft currently differs from the settings the host holds. */
+/**
+ * Whether the draft currently differs from the settings the host holds.
+ * @param draft - what the form currently shows.
+ * @param settings - what the host currently holds.
+ * @returns whether a save would change anything.
+ */
 export function isDirty(draft: SyncSettingsDraft, settings: SyncSettingsDraft): boolean {
   return settingsSignature(draft) !== settingsSignature(settings)
 }
 
-/** The mapping list with trimmed text, the form the host stores. */
-export function cleanMappings(mappings: readonly { key: string; path: string }[]): { key: string; path: string }[] {
-  return mappings.map(mapping => ({ key: mapping.key.trim(), path: mapping.path.trim() }))
-}
-
 /**
  * The patch that turns `settings` into `draft`, holding only the changed
- * fields. Mapping text is trimmed here, so a trailing space the user typed
- * never reaches the host as a change of its own.
+ * fields. Text is trimmed here, so a trailing space the user typed never
+ * reaches the host as a change of its own.
  * @param draft - what the form currently shows.
  * @param settings - what the host currently holds.
  * @returns a patch for the settings write, or `undefined` when nothing changed.
@@ -97,22 +86,21 @@ export function settingsPatch(
   if (draft.cleanup.periodHours !== settings.cleanup.periodHours) cleanup['periodHours'] = draft.cleanup.periodHours
   if (draft.cleanup.keepCommits !== settings.cleanup.keepCommits) cleanup['keepCommits'] = draft.cleanup.keepCommits
   if (Object.keys(cleanup).length > 0) patch['cleanup'] = cleanup
-  const mappings = cleanMappings(draft.mappings)
-  if (JSON.stringify(mappings) !== JSON.stringify(cleanMappings(settings.mappings))) {
-    patch['mappings'] = mappings
-  }
 
   return Object.keys(patch).length > 0 ? patch : undefined
 }
 
-/** Rebuild an editable draft from the resolved settings section. */
+/**
+ * Rebuild an editable draft from the resolved settings section.
+ * @param settings - the host's resolved section.
+ * @returns a fresh draft the form may mutate.
+ */
 export function draftFromSettings(settings: SyncSettingsDraft): SyncSettingsDraft {
   return {
     enabled: settings.enabled,
     remote: settings.remote,
     branch: settings.branch,
     intervalMinutes: settings.intervalMinutes,
-    mappings: settings.mappings.map(mapping => ({ key: mapping.key, path: mapping.path })),
     cleanup: {
       enabled: settings.cleanup.enabled,
       periodHours: settings.cleanup.periodHours,
@@ -139,18 +127,5 @@ export function validateDraft(draft: SyncSettingsDraft, copy: ValidationCopy): V
   if (!Number.isInteger(draft.intervalMinutes) || draft.intervalMinutes < 1) {
     issues.push({ field: 'interval', message: copy.intervalInvalid })
   }
-  const keys = new Set<string>()
-  const paths = new Set<string>()
-  draft.mappings.forEach((mapping, index) => {
-    const key = mapping.key.trim()
-    const path = mapping.path.trim()
-    const row = index + 1
-    if (key.length === 0) issues.push({ field: 'mappings', message: copy.mappingKeyBlank(row) })
-    else if (keys.has(key)) issues.push({ field: 'mappings', message: copy.mappingKeyDuplicate(key) })
-    else keys.add(key)
-    if (path.length === 0) issues.push({ field: 'mappings', message: copy.mappingPathBlank(row) })
-    else if (paths.has(path)) issues.push({ field: 'mappings', message: copy.mappingPathDuplicate(path) })
-    else paths.add(path)
-  })
   return issues
 }

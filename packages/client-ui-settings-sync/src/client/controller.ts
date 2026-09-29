@@ -1,20 +1,31 @@
 /**
- * Session-sync settings page controller: one snapshot joining the
- * `session-sync` settings section, the host sync service status, and the
- * recent cycle log. The Host stays the single fact source — the section comes
- * from the shared configuration form of the `session-sync` profile entry,
- * every field edit is one revision-fenced form write, and status plus the
- * cycle log ride the plugin's own same-origin HTTP API. A page the Host keeps
- * process-local (`mode: 'memory'`) reads the resolved section from that API
- * but never writes. Shape checks stay light here: the Host re-validates every
- * write, and this page's inputs come from the same schema the Host owns.
+ * Session-sync page controller: one snapshot joining the `session-sync`
+ * settings section, the host sync service status, the shared selection tree,
+ * and the recent cycle log. The Host stays the single fact source — the
+ * section comes from the shared configuration form of the `session-sync`
+ * profile entry, every field edit is one revision-fenced form write, and
+ * status, the selection, the per-session records, and the cycle log ride the
+ * plugin's own same-origin HTTP API. A page the Host keeps process-local
+ * (`mode: 'memory'`) reads the resolved section from that API but never
+ * writes. Shape checks stay light here: the Host re-validates every write,
+ * and this page's inputs come from the same schema the Host owns.
+ *
+ * The selection is the v2 currency: the settings page renders it as the
+ * workspace → session tree, and the session row's "..." menu reads a derived
+ * projection of it to decide between 「同步会话」 and 「会话同步中」. That
+ * projection is loaded at client start (before any page is opened) and
+ * refreshed after every mutation, on the pushed invalidations, and after a
+ * manual cycle.
  */
 
 import type { SnapshotStore } from './store.ts'
-import { createSnapshotStore } from './store.ts'
+import { createSnapshotStore, deriveSnapshot } from './store.ts'
+import type { ObservableSnapshot } from './store.ts'
 // Type-only: the shared configuration form of one Host plugin entry.
 import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
-import type { SessionSyncStatusView, SyncLogEntry } from '@linbin-mk/dsh-session-sync'
+import type {
+  SessionSyncRecord, SessionSyncSelectionView, SessionSyncStatusView, SyncLogEntry,
+} from '@linbin-mk/dsh-session-sync'
 import type { SyncApi } from './api.ts'
 
 /** Settings namespace owned by the host session-sync plugin. */
@@ -30,7 +41,7 @@ export const CLEANUP_PERIOD_CHOICES = [24, 48, 72, 168] as const
 const CLEANUP_DEFAULT_PERIOD_HOURS = 24
 const CLEANUP_DEFAULT_KEEP_COMMITS = 200
 
-/** The `session-sync` section shape the page edits. */
+/** The `session-sync` section shape the page edits (v2: no mapping field). */
 export interface SyncSettingsDraft {
   /** Master switch; remote is required while enabled (host validates). */
   enabled: boolean
@@ -40,20 +51,16 @@ export interface SyncSettingsDraft {
   branch: string
   /** Automatic cadence in minutes. */
   intervalMinutes: number
-  /** Project relationships: portable key to local path. */
-  mappings: { key: string; path: string }[]
   /** Periodic git-space cleanup. */
   cleanup: { enabled: boolean; periodHours: number; keepCommits: number }
 }
 
-/** One local workspace the mapping picker can adopt. */
-export interface SyncWorkspaceChoice {
-  /** Workspace id (option value). */
-  workspaceId: string
-  /** Canonical local path the mapping records. */
-  path: string
-  /** Display title. */
-  title: string
+/** Session ids this browser changed locally, ahead of the host's fresh tree. */
+export interface SyncSessionDelta {
+  /** Ids the user just selected (the label flips before the POST answers). */
+  added: string[]
+  /** Ids the user just closed. */
+  removed: string[]
 }
 
 /** Page snapshot. */
@@ -67,14 +74,35 @@ export interface SyncSectionState {
   settings: SyncSettingsDraft | undefined
   /** Host sync status view; undefined until the first successful load. */
   sync: SessionSyncStatusView | undefined
+  /** The shared selection tree; undefined until the first successful read. */
+  selection: SessionSyncSelectionView | undefined
+  /** Failure of the last selection read (the tree keeps its last good value). */
+  selectionError: string | null
+  /** Local session edits not yet reflected by the host's tree. */
+  optimistic: SyncSessionDelta
   /** Recent cycle-log records, newest first; undefined until the first load. */
   logs: SyncLogEntry[] | undefined
   /** A manual sync is awaiting the host cycle. */
   syncing: boolean
   /** Failure of the last manual sync, when one occurred. */
   syncError: string | null
+  /** Failure of the last session action (select / close sync). */
+  sessionError: string | null
   /** A manual git-space cleanup is awaiting the host pass. */
   cleaning: boolean
+}
+
+/** What one session-row menu entry decides from. */
+export interface SyncMenuState {
+  /** The plugin is enabled with a git remote; otherwise no entry renders at all. */
+  configured: boolean
+  /** Sessions in this machine's selection (the host tree plus local adds). */
+  selected: ReadonlySet<string>
+  /**
+   * Selected sessions this machine does not hold: the repo has their artifact,
+   * but their row is not local, so there is nothing to sync from here.
+   */
+  unheld: ReadonlySet<string>
 }
 
 /** Error message from any thrown value. */
@@ -86,16 +114,6 @@ function messageOf(error: unknown): string {
 function decodeSettings(value: unknown): SyncSettingsDraft | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const section = value as Record<string, unknown>
-  const mappingsValue = section['mappings']
-  const mappings: { key: string; path: string }[] = []
-  if (Array.isArray(mappingsValue)) {
-    for (const entry of mappingsValue) {
-      if (typeof entry !== 'object' || entry === null) continue
-      const key = (entry as Record<string, unknown>)['key']
-      const path = (entry as Record<string, unknown>)['path']
-      if (typeof key === 'string' && typeof path === 'string') mappings.push({ key, path })
-    }
-  }
   const cleanupValue = typeof section['cleanup'] === 'object' && section['cleanup'] !== null
     ? section['cleanup'] as Record<string, unknown>
     : {}
@@ -110,13 +128,39 @@ function decodeSettings(value: unknown): SyncSettingsDraft | undefined {
     remote: typeof section['remote'] === 'string' ? section['remote'] : '',
     branch: typeof section['branch'] === 'string' && section['branch'].length > 0 ? section['branch'] : 'main',
     intervalMinutes: typeof section['intervalMinutes'] === 'number' ? section['intervalMinutes'] : 5,
-    mappings,
     cleanup: {
       enabled: cleanupValue['enabled'] === true,
       periodHours: periodHours >= 1 ? periodHours : CLEANUP_DEFAULT_PERIOD_HOURS,
       keepCommits: keepCommits >= 1 ? keepCommits : CLEANUP_DEFAULT_KEEP_COMMITS,
     },
   }
+}
+
+/**
+ * Project one page snapshot into the row-menu facts. A session absent from
+ * the tree is a local row this machine obviously holds — only a selection
+ * row that reports `present: false` can prove otherwise, which is why the
+ * unheld set is built from the tree and not from absence.
+ * @param state - the current page snapshot.
+ * @returns the menu's configuration, selection, and holding facts.
+ */
+export function menuStateOf(state: SyncSectionState): SyncMenuState {
+  const selected = new Set<string>()
+  const unheld = new Set<string>()
+  for (const group of state.selection?.workspaces ?? []) {
+    for (const session of group.sessions) {
+      selected.add(session.id)
+      if (!session.present) unheld.add(session.id)
+    }
+  }
+  // The pending summary repeats ids the groups already carry; unioning it
+  // keeps the label right even if a view ever carries only the summary.
+  for (const pending of state.selection?.pending ?? []) {
+    for (const id of pending.sessionIds) selected.add(id)
+  }
+  for (const id of state.optimistic.added) selected.add(id)
+  for (const id of state.optimistic.removed) selected.delete(id)
+  return { configured: state.sync?.configured === true, selected, unheld }
 }
 
 /**
@@ -146,16 +190,28 @@ export class SyncSectionController {
     writable: false,
     settings: undefined,
     sync: undefined,
+    selection: undefined,
+    selectionError: null,
+    optimistic: { added: [], removed: [] },
     logs: undefined,
     syncing: false,
     syncError: null,
+    sessionError: null,
     cleaning: false,
   })
 
+  /**
+   * The row menu's projection of the snapshot. Stable per source revision,
+   * which is what the renderer's bound selector hook needs.
+   */
+  readonly menu: ObservableSnapshot<SyncMenuState> = deriveSnapshot(this.store, menuStateOf)
+
   private generation = 0
+  private selectionGeneration = 0
 
   /**
-   * @param api - the plugin's HTTP wire face (status, manual actions, log).
+   * @param api - the plugin's HTTP wire face (status, selection, records,
+   * manual actions, log).
    * @param form - the shared configuration form of the `session-sync` Host
    * entry, which owns the settings section's reads and writes.
    */
@@ -167,8 +223,9 @@ export class SyncSectionController {
   /**
    * Refresh the page snapshot: the sync status, then the settings section
    * (the shared form when the Host serves it, otherwise the plugin's own
-   * route), then the cycle log (fail-soft — the log is auxiliary). A failure
-   * keeps the last good values and surfaces the error.
+   * route), then the cycle log and the selection tree (both fail-soft — the
+   * page renders without them). A failure of the first two keeps the last
+   * good values and surfaces the error.
    * @returns nothing; the snapshot carries the outcome.
    */
   async load(): Promise<void> {
@@ -215,6 +272,7 @@ export class SyncSectionController {
       state.sync = sync
     })
     await this.refreshLogs()
+    await this.refreshSelection()
   }
 
   /**
@@ -246,11 +304,141 @@ export class SyncSectionController {
   }
 
   /**
+   * Read the shared selection tree into the snapshot. Fail-soft on purpose:
+   * the row menu and the page keep their last good tree, and the failure is
+   * rendered beside it.
+   * @returns the failure message, or undefined once the tree landed.
+   */
+  async refreshSelection(): Promise<string | undefined> {
+    const generation = ++this.selectionGeneration
+    let selection: SessionSyncSelectionView
+    try {
+      selection = await this.api.getSelection()
+    } catch (error) {
+      const message = messageOf(error)
+      // A newer read owns the field now; this answer is only history.
+      if (generation === this.selectionGeneration) {
+        this.store.update((state) => { state.selectionError = message })
+      }
+      return message
+    }
+    if (generation !== this.selectionGeneration) return undefined
+    this.acceptSelection(selection)
+    return undefined
+  }
+
+  /** Accept one fresh tree as the newest answer and drop the local deltas. */
+  private acceptSelection(selection: SessionSyncSelectionView): void {
+    // Anything already in flight is older than this answer.
+    this.selectionGeneration += 1
+    this.store.update((state) => {
+      state.selection = selection
+      state.selectionError = null
+      state.optimistic = { added: [], removed: [] }
+    })
+  }
+
+  /**
+   * Read the status view into the snapshot without disturbing the page's load
+   * state (the field the page's own empty state reads stays untouched). The
+   * row menu needs it before the Sync page was ever opened: `configured` is
+   * what decides whether the entries render at all.
+   * @returns nothing; a failure leaves the last good view in place and the
+   * next load, invalidation, or footer poll retries.
+   */
+  async refreshStatus(): Promise<void> {
+    let sync: SessionSyncStatusView
+    try {
+      sync = await this.api.status()
+    } catch {
+      return
+    }
+    this.store.update((state) => { state.sync = sync })
+  }
+
+  /**
+   * Add one session to the shared selection ("同步会话" in the row menu). The
+   * local delta lands first so a reopened menu already reads 「会话同步中」;
+   * the host starts a cycle with the request, so the status is re-read too.
+   * @param id - session to select.
+   * @returns the failure message, or undefined once the host accepted it.
+   */
+  async selectSession(id: string): Promise<string | undefined> {
+    this.store.update((state) => {
+      state.sessionError = null
+      state.optimistic = {
+        added: state.optimistic.added.includes(id) ? state.optimistic.added : [...state.optimistic.added, id],
+        removed: state.optimistic.removed.filter(entry => entry !== id),
+      }
+    })
+    let selection: SessionSyncSelectionView
+    try {
+      selection = await this.api.selectSession(id)
+    } catch (error) {
+      const message = messageOf(error)
+      this.store.update((state) => {
+        state.sessionError = message
+        state.optimistic = {
+          ...state.optimistic,
+          added: state.optimistic.added.filter(entry => entry !== id),
+        }
+      })
+      return message
+    }
+    this.acceptSelection(selection)
+    await this.refreshStatus()
+    return undefined
+  }
+
+  /**
+   * Close sync for one session (the row's 关闭同步 and the dialog's action).
+   * The local file is never deleted — only the shared selection entry is.
+   * @param id - session to drop from the selection.
+   * @returns the failure message, or undefined once the host accepted it.
+   */
+  async closeSession(id: string): Promise<string | undefined> {
+    this.store.update((state) => {
+      state.sessionError = null
+      state.optimistic = {
+        added: state.optimistic.added.filter(entry => entry !== id),
+        removed: state.optimistic.removed.includes(id) ? state.optimistic.removed : [...state.optimistic.removed, id],
+      }
+    })
+    let selection: SessionSyncSelectionView
+    try {
+      selection = await this.api.closeSession(id)
+    } catch (error) {
+      const message = messageOf(error)
+      this.store.update((state) => {
+        state.sessionError = message
+        state.optimistic = {
+          ...state.optimistic,
+          removed: state.optimistic.removed.filter(entry => entry !== id),
+        }
+      })
+      return message
+    }
+    this.acceptSelection(selection)
+    await this.refreshStatus()
+    return undefined
+  }
+
+  /**
+   * One session's synchronization records, newest first. Unlike the page
+   * reads this rejects: the dialog renders its own loading and error states.
+   * @param id - session whose records to read.
+   * @returns the records the host stores for that session.
+   */
+  async loadRecords(id: string): Promise<SessionSyncRecord[]> {
+    return await this.api.getRecords(id)
+  }
+
+  /**
    * Merge one patch into the `session-sync` settings section through the
    * shared configuration form and reload the snapshot. The Host validates the
    * merged section and refuses an invalid one; the reload then serves the
    * last good value.
-   * @param patch - plain-object patch over the section (arrays replace wholesale).
+   * @param patch - plain-object patch over the section.
    * @returns the failure message, or undefined once the write and reload landed.
    */
   async update(patch: object): Promise<string | undefined> {
@@ -303,8 +491,10 @@ export class SyncSectionController {
       state.syncError = null
       state.sync = status
     })
-    // The manual cycle appended records; the log panel follows it.
+    // The manual cycle appended records and may have imported, adopted, or
+    // dropped selection entries: the log and the tree follow it.
     await this.refreshLogs()
+    await this.refreshSelection()
     return undefined
   }
 

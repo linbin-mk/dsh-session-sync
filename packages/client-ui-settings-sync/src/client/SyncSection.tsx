@@ -1,28 +1,27 @@
 /**
- * Session-sync settings section: the pin-selection scope note, the master
- * switch, git remote, branch,
- * cadence, the git-space cleanup controls (periodic history truncation plus
- * a manual run), the project-mapping list (key + a local-workspace picker),
- * and the manual sync action with the host status. Edits stay in a draft: the
- * Save button writes exactly the changed fields, Reset drops them, and the
- * local validation mirrors the host's cross-field rules so a mistake is named
- * beside its field. Nothing is committed merely because a field lost focus,
- * and a new mapping row starts empty instead of duplicating the first row.
- * Copy arrives through the locale seat; workspace choices come from the
- * useWorkspaces standard hook.
+ * Session-sync settings section: the scope note, the master switch, git
+ * remote, branch, cadence, the git-space cleanup controls (periodic history
+ * truncation plus a manual run), the read-only selection tree (workspace →
+ * session), the read-only pending-workspace list, and the manual sync action
+ * with the host status. Edits stay in a draft: the Save button writes exactly
+ * the changed fields, Reset drops them, and the local validation mirrors the
+ * host's cross-field rules so a mistake is named beside its field. Nothing is
+ * committed merely because a field lost focus.
+ *
+ * v2 removed the project-mapping editor: what synchronizes is the explicit
+ * session selection, built from the session row's "..." menu and rendered
+ * here for reading only. The pending list deliberately offers no binding
+ * action — creating a same-named workspace locally is the whole remedy.
  */
 
 import { useEffect, useState } from 'react'
-import {
-  Button, IconTrashOutlineRegular, Input, Tooltip,
-} from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { HostObservable, PropsHooks, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-// Type-only: the global `useWorkspaces` standard-hook merge (ui-workspace).
-import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
-import type { SyncLogEntry } from '@linbin-mk/dsh-session-sync'
+import type {
+  SessionSyncSelectionSessionView, SessionSyncSelectionView, SyncLogEntry,
+} from '@linbin-mk/dsh-session-sync'
 import type { SyncSectionController, SyncSectionState, SyncSettingsDraft } from './controller.ts'
 import { CLEANUP_PERIOD_CHOICES, SYNC_INTERVAL_CHOICES } from './controller.ts'
-import type { SyncWorkspaceChoice } from './controller.ts'
 import type { en } from './locales.ts'
 import {
   draftFromSettings, isDirty, settingsPatch, validateDraft,
@@ -41,24 +40,13 @@ export interface SyncSectionInjected {
 }
 
 /**
- * Props delivered by the slot outlet: the runtime share (useWorkspaces for
- * the mapping picker, close) spread flat plus the inject face, whose
- * reserved `hooks` compartment arrives as the bound `useSnapshot` hook.
+ * Props delivered by the slot outlet: the runtime share spread flat plus the
+ * inject face, whose reserved `hooks` compartment arrives as the bound
+ * `useSnapshot` hook.
  */
 export type SyncSectionProps = Partial<PropsRuntime<'settings.section'>>
   & Partial<Omit<SyncSectionInjected, 'hooks'>>
   & Partial<PropsHooks<SyncSectionInjected['hooks']>>
-
-/** Workspace choices for one mapping row, derived from the live list. */
-function workspaceChoices(
-  workspaces: readonly { workspaceId: string; path: string; title: string }[],
-): SyncWorkspaceChoice[] {
-  return workspaces.map(workspace => ({
-    workspaceId: workspace.workspaceId,
-    path: workspace.path,
-    title: workspace.title,
-  }))
-}
 
 /** The interval options, always including the current non-standard value. */
 function intervalOptions(current: number): number[] {
@@ -98,32 +86,81 @@ function logEntryText(
   return `${t('syncLogSuccess')} · ${changeText}${duration.length > 0 ? ` · ${duration}` : ''}`
 }
 
+/** The unmatched-workspace warning for one group (0 carriers) or its ambiguity (several). */
+function matchWarning(
+  matches: number,
+  t: (key: keyof typeof en, params?: Record<string, unknown>) => string,
+): string {
+  return matches > 1 ? t('workspaceAmbiguous') : t('workspaceUnmatched')
+}
+
+/** One session row: title, provenance, last sync, badges, and 关闭同步. */
+function SessionRow({
+  session, closing, onClose, t,
+}: {
+  session: SessionSyncSelectionSessionView
+  closing: boolean
+  onClose: (id: string) => void
+  t: (key: keyof typeof en, params?: Record<string, unknown>) => string
+}) {
+  return (
+    <li className={css.sessionRow}>
+      <div className={css.sessionMain}>
+        {/* A session the repo knows but this machine never titled falls back
+            to its id: an unnamed row would look like a rendering bug. */}
+        <span className={css.sessionTitle}>{session.title.length > 0 ? session.title : session.id}</span>
+        <span className={css.sessionMeta}>
+          {session.addedAt !== undefined && (
+            <span className={css.sessionMetaItem}>{t('sessionAddedAt', { time: displayTime(session.addedAt) })}</span>
+          )}
+          {session.addedBy !== undefined && (
+            <span className={css.sessionMetaItem}>{t('sessionAddedBy', { host: session.addedBy })}</span>
+          )}
+          {session.lastSyncAt !== undefined && (
+            <span className={css.sessionMetaItem}>
+              {session.lastSyncHost !== undefined
+                ? t('sessionLastSync', { host: session.lastSyncHost, time: displayTime(session.lastSyncAt) })
+                : t('sessionLastSyncNoHost', { time: displayTime(session.lastSyncAt) })}
+            </span>
+          )}
+        </span>
+      </div>
+      <div className={css.sessionBadges}>
+        {session.conflicts > 0 && (
+          <span className={css.badgeConflict}>{t('sessionConflict', { count: session.conflicts })}</span>
+        )}
+        {!session.present && <span className={css.badgeMuted}>{t('sessionNotPresent')}</span>}
+        {/* Closing sync is a session action against the plugin's own routes,
+            not a settings write: a read-only settings document does not gate it. */}
+        <Button disabled={closing} onClick={() => { onClose(session.id) }}>{t('closeSync')}</Button>
+      </div>
+    </li>
+  )
+}
+
 /**
  * Render the sync settings page.
  * @param props - composed slot props (runtime share + injected face).
  * @returns the section element tree.
  */
 export function SyncSection({
-  useWorkspaces,
   controller,
   useSnapshot,
   t,
 }: SyncSectionProps) {
   // The outlet can render before the slot's inject face lands; a partial
   // mount paints nothing (the sibling settings sections share this posture).
-  if (controller === undefined || useSnapshot === undefined || t === undefined || useWorkspaces === undefined) {
+  if (controller === undefined || useSnapshot === undefined || t === undefined) {
     return null
   }
   // Narrowed aliases: TS does not carry the guard's narrowing into nested
   // handler functions, and the JSX reads the same snapshot below.
   const sectionController = controller
   const state = useSnapshot((selection: SyncSectionState) => selection)
-  const workspaceState = useWorkspaces((selection: {
-    items: readonly { workspaceId: string; path: string; title: string }[]
-  }) => selection)
   const [draft, setDraft] = useState<SyncSettingsDraft | undefined>(undefined)
   const [writeError, setWriteError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [closingSession, setClosingSession] = useState<string | null>(null)
   // Validation stays quiet until the first Save attempt: a brand-new page with
   // an empty remote is not an error the user made.
   const [validated, setValidated] = useState(false)
@@ -154,16 +191,13 @@ export function SyncSection({
   const issues = validateDraft(settingsDraft, {
     remoteRequired: t('errorRemoteRequired'),
     branchBlank: t('errorBranchBlank'),
-    mappingKeyBlank: (row: number) => t('errorMappingKeyBlank', { row }),
-    mappingPathBlank: (row: number) => t('errorMappingPathBlank', { row }),
-    mappingKeyDuplicate: (key: string) => t('errorMappingKeyDuplicate', { key }),
-    mappingPathDuplicate: (path: string) => t('errorMappingPathDuplicate', { path }),
     intervalInvalid: t('errorIntervalInvalid'),
   })
   const dirty = saved !== undefined && isDirty(settingsDraft, saved)
   const issuesFor = (field: ValidationIssue['field']): ValidationIssue[] =>
     issues.filter(issue => issue.field === field)
   const readOnly = !state.writable
+  const selection: SessionSyncSelectionView | undefined = state.selection
 
   /** Persist the whole draft as one patch of exactly the changed fields. */
   async function save(): Promise<void> {
@@ -194,50 +228,10 @@ export function SyncSection({
     setWriteError(null)
   }
 
-  const choices = workspaceChoices(workspaceState.items.map((workspace: {
-    workspaceId: string
-    path: string
-    title: string
-  }) => ({
-    workspaceId: workspace.workspaceId,
-    path: workspace.path,
-    title: workspace.title,
-  })))
   const configured = settingsDraft.enabled && settingsDraft.remote.trim().length > 0
-  const noWorkspaces = choices.length === 0
 
   function setEnabled(enabled: boolean): void {
     setDraft({ ...settingsDraft, enabled })
-  }
-
-  function setMappingKey(index: number, key: string): void {
-    const mappings = settingsDraft.mappings.map((mapping, at) => (at === index ? { ...mapping, key } : mapping))
-    setDraft({ ...settingsDraft, mappings })
-  }
-
-  function setMappingPath(index: number, path: string): void {
-    const mappings = settingsDraft.mappings.map((mapping, at) => (at === index ? { ...mapping, path } : mapping))
-    setDraft({ ...settingsDraft, mappings })
-  }
-
-  /**
-   * Append an empty mapping row. The row is a draft: it commits only when the
-   * user names its key, picks a directory, and saves — which is what makes
-   * adding a second project possible at all (the old form submitted the row
-   * immediately with the first row's path and the host refused the duplicate).
-   */
-  function addMapping(): void {
-    setDraft({
-      ...settingsDraft,
-      mappings: [...settingsDraft.mappings, { key: '', path: '' }],
-    })
-  }
-
-  function removeMapping(index: number): void {
-    setDraft({
-      ...settingsDraft,
-      mappings: settingsDraft.mappings.filter((_mapping, at) => at !== index),
-    })
   }
 
   async function runSync(): Promise<void> {
@@ -246,6 +240,13 @@ export function SyncSection({
 
   async function runCleanup(): Promise<void> {
     await sectionController.cleanupNow()
+  }
+
+  /** Close sync for one session, holding the row's button until it settles. */
+  async function closeSync(id: string): Promise<void> {
+    setClosingSession(id)
+    await sectionController.closeSession(id)
+    setClosingSession(null)
   }
 
   return (
@@ -378,65 +379,70 @@ export function SyncSection({
           }}
         />
       </div>
-      <div className={css.mappingActions}>
+      <div className={css.formActions}>
         <Button disabled={readOnly || !configured || state.cleaning} onClick={() => { void runCleanup() }}>
           {state.cleaning ? t('cleaning') : t('cleanupNow')}
         </Button>
       </div>
 
-      <h3 className={css.subtitle}>{t('mappings')}</h3>
-      <p className={css.hint}>{t('mappingsHint')}</p>
-      {validated && issuesFor('mappings').map(issue => (
-        <p className={css.fieldError} key={issue.message}>{issue.message}</p>
-      ))}
-      {settingsDraft.mappings.length === 0 && <p className={css.hint}>{t('unmapped')}</p>}
-      {noWorkspaces && <p className={css.error}>{t('noWorkspaces')}</p>}
-      {settingsDraft.mappings.map((mapping, index) => (
-        <div className={css.mappingRow} key={index}>
-          <div className={css.field}>
-            <label className={css.label} htmlFor={`sync-key-${index}`}>{t('mappingKey')}</label>
-            <Input
-              id={`sync-key-${index}`}
-              value={mapping.key}
-              disabled={readOnly}
-              placeholder={t('mappingKeyPlaceholder')}
-              onChange={(event) => { setMappingKey(index, event.target.value) }}
-            />
+      {/* The selection tree is read-only here by design: sessions join it from
+          the row menu, and a row's only action is leaving it. */}
+      <h3 className={css.subtitle}>{t('selectionTitle')}</h3>
+      <p className={css.hint}>{t('selectionHint')}</p>
+      {state.selectionError !== null && (
+        <p className={css.error}>{t('selectionFailed', { message: state.selectionError })}</p>
+      )}
+      {state.sessionError !== null && (
+        <p className={css.error}>{t('sessionActionFailed', { message: state.sessionError })}</p>
+      )}
+      {selection === undefined || selection.total === 0
+        ? <p className={css.hint}>{t('selectionEmpty')}</p>
+        : (
+          <div className={css.tree}>
+            <p className={css.hint}>{t('selectionTotal', { count: selection.total })}</p>
+            {selection.workspaces.map((group, index) => (
+              // A group only exists locally (this machine selected a session
+              // it has not published yet) and so carries no repo key.
+              <div className={css.workspaceGroup} key={group.key ?? `${group.name}#${index}`}>
+                <div className={css.workspaceHead}>
+                  <span className={css.workspaceName}>{group.name}</span>
+                  {!group.matched && (
+                    <span className={css.badgeWarning} role="status">{matchWarning(group.matches, t)}</span>
+                  )}
+                </div>
+                <ul className={css.sessionList}>
+                  {group.sessions.map(session => (
+                    <SessionRow
+                      key={session.id}
+                      session={session}
+                      closing={closingSession === session.id}
+                      onClose={(id) => { void closeSync(id) }}
+                      t={t}
+                    />
+                  ))}
+                </ul>
+              </div>
+            ))}
           </div>
-          <div className={css.field}>
-            <label className={css.label} htmlFor={`sync-path-${index}`}>{t('mappingPath')}</label>
-            <select
-              id={`sync-path-${index}`}
-              className={css.select}
-              value={mapping.path}
-              disabled={readOnly || noWorkspaces}
-              onChange={(event) => { setMappingPath(index, event.target.value) }}
-            >
-              {mapping.path.length === 0 && <option value="">{t('mappingPathPlaceholder')}</option>}
-              {mapping.path.length > 0 && !choices.some(choice => choice.path === mapping.path) && (
-                <option value={mapping.path}>{mapping.path}</option>
-              )}
-              {choices.map(choice => (
-                <option key={choice.workspaceId} value={choice.path}>{choice.title} ({choice.path})</option>
-              ))}
-            </select>
-          </div>
-          <Tooltip label={t('removeMapping', { key: mapping.key || `#${index + 1}` })} side="bottom" delayMs={500}>
-            <button
-              type="button"
-              className={css.removeButton}
-              disabled={readOnly}
-              aria-label={t('removeMapping', { key: mapping.key || `#${index + 1}` })}
-              onClick={() => { removeMapping(index) }}
-            >
-              <IconTrashOutlineRegular size={14} />
-            </button>
-          </Tooltip>
+        )}
+
+      {/* Read-only on purpose: the remedy is creating a same-named workspace,
+          never binding a repo workspace to a local one. */}
+      {selection !== undefined && selection.pending.length > 0 && (
+        <div className={css.pendingBlock}>
+          <h3 className={css.subtitle}>{t('pendingTitle')}</h3>
+          <p className={css.hint}>{t('pendingHint')}</p>
+          <ul className={css.pendingList}>
+            {selection.pending.map(entry => (
+              <li className={css.pendingRow} key={entry.key}>
+                <span className={css.pendingName}>{entry.name}</span>
+                <span className={css.badgeWarning} role="status">{matchWarning(entry.matches, t)}</span>
+                <span className={css.pendingCount}>{t('pendingCount', { count: entry.sessionIds.length })}</span>
+              </li>
+            ))}
+          </ul>
         </div>
-      ))}
-      <div className={css.mappingActions}>
-        <Button disabled={readOnly || noWorkspaces} onClick={addMapping}>{t('addMapping')}</Button>
-      </div>
+      )}
 
       <div className={css.statusBlock}>
         <div className={css.statusActions}>
@@ -460,14 +466,14 @@ export function SyncSection({
               {state.sync !== undefined && state.sync.lastRun.archived > 0 && (
                 <dd>{t('archived', { count: state.sync.lastRun.archived })}</dd>
               )}
-              {state.sync !== undefined && state.sync.lastRun.deletedUnpinned > 0 && (
-                <dd>{t('deletedUnpinned', { count: state.sync.lastRun.deletedUnpinned })}</dd>
+              {state.sync !== undefined && state.sync.lastRun.deletedUnselected > 0 && (
+                <dd>{t('deletedUnselected', { count: state.sync.lastRun.deletedUnselected })}</dd>
               )}
-              {state.sync !== undefined && state.sync.lastRun.pinned > 0 && (
-                <dd>{t('pinned', { count: state.sync.lastRun.pinned })}</dd>
+              {state.sync !== undefined && state.sync.lastRun.adopted > 0 && (
+                <dd>{t('adopted', { count: state.sync.lastRun.adopted })}</dd>
               )}
-              {state.sync !== undefined && state.sync.lastRun.unpinned > 0 && (
-                <dd>{t('unpinned', { count: state.sync.lastRun.unpinned })}</dd>
+              {state.sync !== undefined && state.sync.lastRun.dropped > 0 && (
+                <dd>{t('dropped', { count: state.sync.lastRun.dropped })}</dd>
               )}
               {state.sync !== undefined && state.sync.lastRun.deleted > 0 && (
                 <dd>{t('deleted', { count: state.sync.lastRun.deleted })}</dd>

@@ -1,18 +1,39 @@
+import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import { SESSION_FORMAT_VERSION, SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import {
-  compareLogs, decidePinSync, runSyncCycle,
+  assignWorkspaceKey, compareLogs, decideSelectionSync, foldTitle, runSyncCycle,
 } from '../src/engine.ts'
-import type { SyncEngineDeps, SyncFilesystem, SyncGit, SyncPersistence, SyncProjectionCache, SyncWorkspaceRegistry } from '../src/engine.ts'
-import { ARCHIVE_NAME, MANIFEST_NAME, PIN_NAME, serializeArchiveList, serializeManifest, serializePinList } from '../src/format.ts'
+import type {
+  SelectionDecision, SelectionInput, SyncEngineDeps, SyncFilesystem, SyncGit, SyncPersistence,
+  SyncProjectionCache, SyncWorkspace, SyncWorkspaceRegistry,
+} from '../src/engine.ts'
+import {
+  ARCHIVE_NAME, MANIFEST_NAME, SYNC_RECORD_LIMIT, WORKSPACES_DIR,
+  archiveRepoPath, manifestRepoPath, mergeRecords, parsePortableSession, parseRecords, parseSelection,
+  recordsRepoPath, selectionRepoPath, serializeArchiveList, serializeManifest, serializePortableSession,
+  serializeSelection, sessionRepoPath, workspaceRepoDir,
+} from '../src/format.ts'
+import type { SessionSyncRecord, SyncSelectionEntry, SyncState } from '../src/format.ts'
 import { DEFAULT_BRANCH, DEFAULT_INTERVAL_MINUTES } from '../src/settings.ts'
 import type { SessionSyncSettings } from '../src/settings.ts'
 
-function header(id: string, cwd: string, createdAt = 1): SessionHeader {
-  return { version: SESSION_FORMAT_VERSION, id: SessionId(id), createdAt, cwd, isSeeded: false, delegationDepth: 0 }
+const NOW_ISO = '2026-09-29T10:00:00.000Z'
+const NOW = (): Date => new Date(NOW_ISO)
+
+function header(id: string, cwd: string | undefined, createdAt = 1): SessionHeader {
+  return {
+    version: SESSION_FORMAT_VERSION,
+    id: SessionId(id),
+    createdAt,
+    ...cwd === undefined ? {} : { cwd },
+    isSeeded: false,
+    delegationDepth: 0,
+  }
 }
 
+/** `count` closed turns, so the log never ends mid-turn. */
 function events(count: number, offset = 0): SessionEvent[] {
   const list: SessionEvent[] = []
   for (let index = 0; index < count; index++) {
@@ -23,6 +44,15 @@ function events(count: number, offset = 0): SessionEvent[] {
   return list
 }
 
+/** One `session/title` event, the harness way of storing a title. */
+function titleEvent(title: string, seq = 0): SessionEvent {
+  // `seq` is a branded SessionSeq in the event map; a literal number keeps the
+  // fixture readable, so the cast goes through `unknown`.
+  return {
+    type: 'session/title', seq, time: seq + 1, data: { title, messageSeqs: [], source: { kind: 'user' } },
+  } as unknown as SessionEvent
+}
+
 /** A log left mid-turn: the turn started a step and never closed it. */
 function midTurnEvents(): SessionEvent[] {
   return [
@@ -31,20 +61,47 @@ function midTurnEvents(): SessionEvent[] {
   ]
 }
 
-function artifactForEvents(id: string, key: string, list: SessionEvent[]): string {
-  const meta = header(id, key)
-  const lines = [
-    JSON.stringify({
-      type: 'dsh-session-sync', version: 1, project: key, inheritedEventCount: 0,
-      session: { version: SESSION_FORMAT_VERSION, id, createdAt: meta.createdAt, isSeeded: false, delegationDepth: 0 },
-    }),
-    ...list.map(event => JSON.stringify(event)),
-  ]
-  return lines.join('\n') + '\n'
+/** One repo artifact text for a session whose header carries no local path. */
+function artifactForEvents(id: string, key: string, list: SessionEvent[], overrides: Partial<SessionHeader> = {}): string {
+  return serializePortableSession({
+    meta: { ...header(id, undefined), ...overrides },
+    inheritedEventCount: SessionLogOffset(0),
+    events: list,
+  }, key)
 }
 
 function artifactFor(id: string, key: string, count: number): string {
   return artifactForEvents(id, key, events(count))
+}
+
+/** One repo selection entry with stable provenance. */
+function entry(id: string, key = 'ws-a', workspaceName = 'demo', title = 'A session'): SyncSelectionEntry {
+  return {
+    id: SessionId(id),
+    key,
+    workspaceName,
+    title,
+    addedAt: '2026-09-01T00:00:00.000Z',
+    addedBy: 'seed',
+  }
+}
+
+function selectionFile(entries: readonly SyncSelectionEntry[]): string {
+  return serializeSelection({ host: 'seed', updatedAt: '2026-09-01T00:00:00.000Z', entries: [...entries] })
+}
+
+/** A repo workspace directory: its manifest plus its artifact files. */
+function repoWorkspace(key: string, name: string, artifacts: Readonly<Record<string, string>> = {}): Record<string, string> {
+  const files: Record<string, string> = {
+    [manifestRepoPath(key)]: serializeManifest({ key, name, updatedAt: '2026-09-01T00:00:00.000Z' }),
+  }
+  for (const [id, text] of Object.entries(artifacts)) files[sessionRepoPath(key, SessionId(id))] = text
+  return files
+}
+
+/** The name-derived key a fresh machine mints for a workspace. */
+function mintedKey(name: string): string {
+  return `ws-${createHash('sha1').update(name).digest('hex').slice(0, 10)}`
 }
 
 /** Fake persistence storing one map of session id → events. */
@@ -52,14 +109,19 @@ class FakePersistence implements SyncPersistence {
   readonly sessions = new Map<string, { meta: SessionHeader; inheritedEventCount: ReturnType<typeof SessionLogOffset>; events: SessionEvent[] }>()
   readonly appendCalls: { id: string; count: number }[] = []
   created: string[] = []
+  /** Sessions `inspect` rejects for, standing in for a read fault. */
   failReadFrom = false
-  failAttachOn: string[] = []
-  phantomList: string[] = []
-  noCwdList: string[] = []
+  /** A foreign throw (not an Error) from `inspect`. */
   throwStringOn?: string
+  /** Headers `list` reports that `inspect` answers undefined for. */
+  phantomList: string[] = []
+  /** Headers `list` reports without a cwd. */
+  noCwdList: string[] = []
 
-  seed(id: string, cwd: string, count: number): void {
-    this.sessions.set(id, { meta: header(id, cwd), inheritedEventCount: SessionLogOffset(0), events: events(count) })
+  seed(id: string, cwd: string, count: number, options: { title?: string } = {}): void {
+    const list = events(count)
+    if (options.title !== undefined) list.push(titleEvent(options.title, list.length))
+    this.seedEvents(id, cwd, list)
   }
 
   seedEvents(id: string, cwd: string, list: SessionEvent[]): void {
@@ -94,13 +156,7 @@ class FakePersistence implements SyncPersistence {
     return [
       ...[...this.sessions.values()].map(stored => stored.meta),
       ...this.phantomList.map(id => header(id, '/work/demo')),
-      ...this.noCwdList.map((id): SessionHeader => ({
-        version: SESSION_FORMAT_VERSION,
-        id: SessionId(id),
-        createdAt: 1,
-        isSeeded: false,
-        delegationDepth: 0,
-      })),
+      ...this.noCwdList.map(id => header(id, undefined)),
     ]
   }
 }
@@ -118,26 +174,34 @@ class FakeProjectionCache implements SyncProjectionCache {
   }
 }
 
-/** Fake workspace registry: one map of path → attached ids plus grow-only archive and pin sets. */
+/** Fake workspace registry: the local title table plus attach accounting and a grow-only archive set. */
 class FakeWorkspaces implements SyncWorkspaceRegistry {
   readonly attached = new Map<string, string[]>()
   readonly archivedIds: SessionId[] = []
-  /** The registry-global pin set, most recently pinned first — the sync selection. */
-  readonly pinnedIds: SessionId[] = []
-  createCalls: string[] = []
+  readonly entries: { id: string; title: string; path: string }[] = []
   failAttachOn: string[] = []
   failArchiveOn: string[] = []
-  failPinOn: string[] = []
-  failUnpinOn: string[] = []
 
-  async resolveByPath(path: string): Promise<{ attachSession(id: SessionId): Promise<void> } | undefined> {
-    return this.attached.has(path) ? { attachSession: id => this.attach(path, id) } : undefined
+  /** Register one local workspace: the row a repo manifest name is matched against. */
+  add(path: string, title: string, id = path): this {
+    this.entries.push({ id, title, path })
+    this.attached.set(path, [])
+    return this
   }
 
-  async create(path: string): Promise<{ attachSession(id: SessionId): Promise<void> }> {
-    this.createCalls.push(path)
-    this.attached.set(path, [])
-    return { attachSession: id => this.attach(path, id) }
+  list(): SyncWorkspace[] {
+    return this.entries.map(entry => ({
+      id: entry.id,
+      title: entry.title,
+      path: entry.path,
+      attachSession: (id: SessionId) => this.attach(entry.path, id),
+    }))
+  }
+
+  async resolveByPath(path: string): Promise<SyncWorkspace | undefined> {
+    const entry = this.entries.find(candidate => candidate.path === path)
+    if (entry === undefined) return undefined
+    return { id: entry.id, title: entry.title, path: entry.path, attachSession: id => this.attach(entry.path, id) }
   }
 
   archivedSessionIds(): readonly SessionId[] {
@@ -149,76 +213,47 @@ class FakeWorkspaces implements SyncWorkspaceRegistry {
     this.archivedIds.push(id)
   }
 
-  pinnedSessionIds(): readonly SessionId[] {
-    return this.pinnedIds
-  }
-
-  async pinSession(id: SessionId): Promise<void> {
-    if (this.failPinOn.includes(String(id))) throw new Error('pin rejected')
-    if (!this.pinnedIds.some(candidate => String(candidate) === String(id))) this.pinnedIds.unshift(id)
-  }
-
-  async unpinSession(id: SessionId): Promise<void> {
-    if (this.failUnpinOn.includes(String(id))) throw new Error('unpin rejected')
-    const at = this.pinnedIds.findIndex(candidate => String(candidate) === String(id))
-    if (at !== -1) this.pinnedIds.splice(at, 1)
-  }
-
   private async attach(path: string, id: SessionId): Promise<void> {
     if (this.failAttachOn.includes(path)) throw new Error('attach rejected')
     this.attached.get(path)!.push(String(id))
   }
 }
 
-/** In-memory repo filesystem. */
+/** In-memory repo worktree plus this machine's selection mirror and anchor. */
 class FakeFilesystem implements SyncFilesystem {
   readonly hostname = 'test-host'
   readonly files = new Map<string, string>()
   readonly deleted: string[] = []
-  /** Directories removed by the empty-project sweep, in order. */
+  /** Directories removed by the empty-workspace sweep, in order. */
   readonly deletedDirs: string[] = []
   /** Directory entries the fixture has listed; they outlive their last file. */
   private readonly dirs = new Set<string>()
   /** File names listFiles reports but readRepoFile answers undefined for. */
   phantom: string[] = []
-  /** This machine's pin baseline; undefined is the fresh-machine state. */
-  baseline: { firstSeen: boolean; sessionIds: string[]; ownedIds: string[] } | undefined
-  /** Baseline writes, in order. */
-  readonly baselineWrites: { firstSeen: boolean; sessionIds: string[]; ownedIds: string[] }[] = []
-  /** Pin-list writes, in order (the fixture's synthesized default is not one). */
-  readonly pinWrites: string[] = []
+  /** This machine's selection mirror; undefined before the plugin ever ran. */
+  localSelection: string[] | undefined
+  /** Selection-mirror writes, in order. */
+  readonly localSelectionWrites: string[][] = []
+  /** This machine's sync anchor; undefined before its first cycle. */
+  syncState: SyncState | undefined
+  /** Anchor writes, in order. */
+  readonly stateWrites: SyncState[] = []
 
-  constructor(seed?: Record<string, string>) {
-    for (const [rel, content] of Object.entries(seed ?? {})) this.files.set(rel, content)
+  constructor(seed: Record<string, string> = {}) {
+    this.seed(seed)
   }
 
-  /** Every session id a repo artifact path in this worktree mentions. */
-  private selectedIds(): string[] {
-    const ids = new Set<string>()
-    for (const rel of this.files.keys()) {
-      const match = /^projects\/[^/]+\/(session-[A-Za-z0-9-]+)\.jsonl$/.exec(rel)
-      if (match?.[1] !== undefined) ids.add(match[1])
-    }
-    return [...ids]
+  /** Add repo files (a fixture's workspace directory) to the worktree. */
+  seed(files: Readonly<Record<string, string>>): void {
+    for (const [rel, content] of Object.entries(files)) this.files.set(rel, content)
   }
 
   async readRepoFile(rel: string): Promise<string | undefined> {
     if (this.phantom.includes(rel)) return undefined
-    const stored = this.files.get(rel)
-    if (stored !== undefined) return stored
-    // A fixture repo without an explicit pin list selects whatever artifacts
-    // it carries plus this machine's pins. Real repos always carry the file
-    // (the first pin edit writes it); this default keeps the mechanics suites
-    // — import, export, archive — about mechanics, while the pin-selection
-    // suites below set both the file and the baseline explicitly.
-    if (rel === PIN_NAME) {
-      return pinnedFile(this.selectedIds())
-    }
-    return undefined
+    return this.files.get(rel)
   }
 
   async writeRepoFile(rel: string, content: string): Promise<void> {
-    if (rel === PIN_NAME) this.pinWrites.push(content)
     this.files.set(rel, content)
   }
 
@@ -231,7 +266,9 @@ class FakeFilesystem implements SyncFilesystem {
 
   async deleteRepoDir(rel: string): Promise<boolean> {
     const prefix = `${rel}/`
-    for (const member of [...this.files.keys()].filter(key => key.startsWith(prefix))) this.files.delete(member)
+    // `rmdir` semantics: a directory still holding anything (a manifest, an
+    // archive list) cannot be removed.
+    if ([...this.files.keys()].some(key => key.startsWith(prefix))) return false
     // A directory survives its last file until something removes the entry
     // itself, so only one this fixture has listed can be removed.
     if (!this.dirs.delete(rel)) return false
@@ -241,39 +278,45 @@ class FakeFilesystem implements SyncFilesystem {
 
   async listDirs(rel: string): Promise<string[]> {
     const prefix = rel === '' ? '' : `${rel}/`
-    const names = [
-      ...[...this.files.keys()]
-        .filter(key => key.startsWith(prefix))
-        .map(key => key.slice(prefix.length).split('/')[0]!),
-      ...this.phantom
-        .filter(name => name.startsWith(prefix))
-        .map(name => name.slice(prefix.length).split('/')[0]!),
-    ]
-    const listed = [...new Set(names)].filter(name => !name.includes('.'))
+    const names = [...this.files.keys(), ...this.phantom]
+      .filter(key => key.startsWith(prefix))
+      .map(key => key.slice(prefix.length).split('/')[0]!)
+    const listed = [...new Set(names)].filter(name => name.length > 0 && !name.includes('.'))
     for (const name of listed) this.dirs.add(rel === '' ? name : `${rel}/${name}`)
     return listed
   }
 
   async listFiles(rel: string): Promise<string[]> {
     const prefix = `${rel}/`
-    return [
-      ...[...this.files.keys()]
-        .filter(key => key.startsWith(prefix))
-        .map(key => key.slice(prefix.length))
-        .filter(name => !name.includes('/')),
-      ...this.phantom.map(name => name.slice(`${rel}/`.length)).filter(name => !name.includes('/')),
-    ]
+    return [...this.files.keys(), ...this.phantom]
+      .filter(key => key.startsWith(prefix))
+      .map(key => key.slice(prefix.length))
+      .filter(name => !name.includes('/'))
   }
 
-  async readPinBaseline(): Promise<{ firstSeen: boolean; sessionIds: string[]; ownedIds: string[] } | undefined> {
-    return this.baseline === undefined
-      ? undefined
-      : { ...this.baseline, sessionIds: [...this.baseline.sessionIds], ownedIds: [...this.baseline.ownedIds] }
+  async readState(): Promise<SyncState | undefined> {
+    return this.syncState
   }
 
-  async writePinBaseline(snapshot: { firstSeen: boolean; sessionIds: string[]; ownedIds: string[] }): Promise<void> {
-    this.baseline = { ...snapshot, sessionIds: [...snapshot.sessionIds], ownedIds: [...snapshot.ownedIds] }
-    this.baselineWrites.push(this.baseline)
+  async writeState(state: SyncState): Promise<void> {
+    const stored: SyncState = {
+      ...state,
+      syncedIds: [...state.syncedIds],
+      ownedIds: [...state.ownedIds],
+      workspaceKeys: state.workspaceKeys.map(entry => ({ ...entry })),
+    }
+    this.syncState = stored
+    this.stateWrites.push(stored)
+  }
+
+  async readLocalSelection(): Promise<{ sessionIds: SessionId[] } | undefined> {
+    if (this.localSelection === undefined) return undefined
+    return { sessionIds: this.localSelection.map(id => SessionId(id)) }
+  }
+
+  async writeLocalSelection(selection: { sessionIds: readonly SessionId[] }): Promise<void> {
+    this.localSelection = selection.sessionIds.map(String)
+    this.localSelectionWrites.push([...this.localSelection])
   }
 }
 
@@ -301,22 +344,25 @@ function settings(overrides: Partial<SessionSyncSettings> = {}): SessionSyncSett
     remote: 'git@example.com:team/repo.git',
     branch: DEFAULT_BRANCH,
     intervalMinutes: DEFAULT_INTERVAL_MINUTES,
-    mappings: [{ key: 'demo', path: '/work/demo' }],
     cleanup: { enabled: false, periodHours: 24, keepCommits: 200 },
     ...overrides,
   }
 }
 
-/** The repo pin list as a reader sees it, attributed for diagnostics only. */
-function pinnedFile(ids: readonly string[]): string {
-  return serializePinList({
-    sessionIds: ids.map(id => SessionId(id)),
+/** One anchor saying this machine last synced `syncedIds` and may drop `ownedIds`. */
+function anchor(syncedIds: readonly string[], ownedIds: readonly string[] = syncedIds): SyncState {
+  return {
+    firstSeen: true,
+    syncedIds: syncedIds.map(id => SessionId(id)),
+    ownedIds: ownedIds.map(id => SessionId(id)),
+    workspaceKeys: [],
+    updatedAt: '2026-09-01T00:00:00.000Z',
     host: 'other-host',
-    updatedAt: '2026-01-01T00:00:00.000Z',
-  })
+  }
 }
 
-function deps(overrides: Partial<SyncEngineDeps> = {}): {  deps: SyncEngineDeps
+function deps(overrides: Partial<SyncEngineDeps> = {}): {
+  deps: SyncEngineDeps
   persistence: FakePersistence
   workspaces: FakeWorkspaces
   projectionCache: FakeProjectionCache
@@ -325,7 +371,7 @@ function deps(overrides: Partial<SyncEngineDeps> = {}): {  deps: SyncEngineDeps
   warnings: string[]
 } {
   const persistence = overrides.persistence as FakePersistence ?? new FakePersistence()
-  const workspaces = overrides.workspaces as FakeWorkspaces ?? new FakeWorkspaces()
+  const workspaces = overrides.workspaces as FakeWorkspaces ?? new FakeWorkspaces().add('/work/demo', 'demo', 'local-1')
   const projectionCache = overrides.projectionCache as FakeProjectionCache ?? new FakeProjectionCache()
   const fs = overrides.fs as FakeFilesystem ?? new FakeFilesystem()
   const git = overrides.git as FakeGit ?? new FakeGit()
@@ -339,6 +385,7 @@ function deps(overrides: Partial<SyncEngineDeps> = {}): {  deps: SyncEngineDeps
       fs,
       git,
       logger: { warn: message => warnings.push(message) },
+      now: NOW,
       ...overrides,
     },
     persistence,
@@ -350,6 +397,13 @@ function deps(overrides: Partial<SyncEngineDeps> = {}): {  deps: SyncEngineDeps
   }
 }
 
+/** The same fixture without a workspace registry (the optional-service deployment shape). */
+function unregistered(world: ReturnType<typeof deps>): SyncEngineDeps {
+  const clone: SyncEngineDeps = { ...world.deps }
+  delete (clone as { workspaces?: unknown }).workspaces
+  return clone
+}
+
 describe('compareLogs', () => {
   it('relates equal, prefix, and divergent logs', () => {
     const a = events(3)
@@ -359,54 +413,337 @@ describe('compareLogs', () => {
     expect(compareLogs(events(5), a)).toBe('remote-prefix')
     const divergent = [...events(2), { type: 'turn/start', seq: 2, data: { turn: 99 } } as SessionEvent]
     expect(compareLogs(a, divergent)).toBe('divergent')
+    expect(compareLogs([], [])).toBe('equal')
+    expect(compareLogs([], events(1))).toBe('local-prefix')
+  })
+})
+
+describe('decideSelectionSync', () => {
+  function input(overrides: Partial<SelectionInput> = {}): SelectionInput {
+    return { localIds: [], repoIds: undefined, anchor: undefined, archivedIds: [], repoArchivedIds: [], ...overrides }
+  }
+
+  function decision(overrides: Partial<SelectionInput> = {}): SelectionDecision {
+    return decideSelectionSync(input(overrides))
+  }
+
+  it('lets a fresh machine adopt the repo selection without publishing or sweeping', () => {
+    expect(decision({ repoIds: ['session-a'] })).toEqual({
+      publish: false,
+      canSweep: false,
+      selectedIds: ['session-a'],
+      adoptedIds: ['session-a'],
+      droppedIds: [],
+      publishedIds: ['session-a'],
+      retiredIds: [],
+      ownedIds: ['session-a'],
+    })
+  })
+
+  it('publishes a selection a never-synced machine already holds, still sweeping nothing', () => {
+    expect(decision({ localIds: ['session-local'], repoIds: ['session-a'] })).toEqual({
+      publish: true,
+      canSweep: false,
+      selectedIds: ['session-a'],
+      adoptedIds: ['session-a'],
+      droppedIds: [],
+      publishedIds: ['session-a', 'session-local'],
+      retiredIds: [],
+      ownedIds: ['session-local', 'session-a'],
+    })
+  })
+
+  it('publishes nothing when a fresh machine already matches the repo', () => {
+    const selection = decision({ localIds: ['session-a'], repoIds: ['session-a'] })
+    expect(selection.publish).toBe(false)
+    expect(selection.publishedIds).toEqual(['session-a'])
+    expect(selection.adoptedIds).toEqual([])
+    expect(selection.canSweep).toBe(false)
+  })
+
+  it('never publishes an id archived on either side', () => {
+    const selection = decision({
+      localIds: ['session-a', 'session-b', 'session-c'],
+      repoIds: [],
+      archivedIds: ['session-a'],
+      repoArchivedIds: ['session-b'],
+    })
+    expect(selection.publish).toBe(true)
+    expect(selection.publishedIds).toEqual(['session-c'])
+    expect(selection.retiredIds).toEqual([])
+    expect(selection.ownedIds).toEqual(['session-a', 'session-b', 'session-c'])
+  })
+
+  it('adopts a repo-side move when the local set still equals the anchor', () => {
+    expect(decision({ localIds: ['session-a', 'session-b'], repoIds: ['session-a'], anchor: anchor(['session-a', 'session-b']) }))
+      .toEqual({
+        publish: false,
+        canSweep: true,
+        selectedIds: ['session-a'],
+        adoptedIds: [],
+        droppedIds: ['session-b'],
+        publishedIds: ['session-a'],
+        retiredIds: [],
+        ownedIds: ['session-a', 'session-b'],
+      })
+  })
+
+  it('does not drop a repo-removed id this machine never owned', () => {
+    const selection = decision({
+      localIds: ['session-a', 'session-b'],
+      repoIds: ['session-a'],
+      anchor: anchor(['session-a', 'session-b'], ['session-a']),
+    })
+    expect(selection.droppedIds).toEqual([])
+    expect(selection.publish).toBe(false)
+    expect(selection.retiredIds).toEqual([])
+  })
+
+  it('needs no local drop for an archived id: the sweep owns its artifact', () => {
+    const selection = decision({
+      localIds: ['session-a', 'session-b'],
+      repoIds: ['session-a'],
+      anchor: anchor(['session-a', 'session-b']),
+      archivedIds: ['session-b'],
+    })
+    expect(selection.droppedIds).toEqual([])
+    expect(selection.retiredIds).toEqual([])
+    expect(selection.publishedIds).toEqual(['session-a'])
+  })
+
+  it('refuses to sweep an empty repo selection: it may be a fresh repo, not a removal', () => {
+    const selection = decision({ localIds: ['session-a', 'session-b'], repoIds: [], anchor: anchor(['session-a', 'session-b']) })
+    expect(selection.canSweep).toBe(false)
+    expect(selection.droppedIds).toEqual(['session-a', 'session-b'])
+    expect(selection.retiredIds).toEqual([])
+    expect(selection.publishedIds).toEqual([])
+  })
+
+  it('publishes a local edit and retires exactly the ids it owned', () => {
+    const selection = decision({
+      localIds: ['session-a'],
+      repoIds: ['session-a', 'session-b'],
+      anchor: anchor(['session-a', 'session-b']),
+    })
+    expect(selection.publish).toBe(true)
+    expect(selection.canSweep).toBe(true)
+    expect(selection.selectedIds).toEqual(['session-a', 'session-b'])
+    // The repo's entries this machine does not hold are mirrored into its own
+    // selection; the engine applies that mirror after the import pass, which is
+    // why a locally dropped id re-enters the mirror until the next cycle reads
+    // the removal it published.
+    expect(selection.adoptedIds).toEqual(['session-b'])
+    expect(selection.droppedIds).toEqual([])
+    expect(selection.publishedIds).toEqual(['session-a'])
+    expect(selection.retiredIds).toEqual(['session-b'])
+    expect(selection.ownedIds).toEqual(['session-a', 'session-b'])
+  })
+
+  it('excludes an archived id from the publication and from retirement', () => {
+    const selection = decision({
+      localIds: ['session-a'],
+      repoIds: ['session-a', 'session-b'],
+      anchor: anchor(['session-a', 'session-b']),
+      archivedIds: ['session-b'],
+    })
+    expect(selection.publishedIds).toEqual(['session-a'])
+    expect(selection.retiredIds).toEqual([])
+  })
+
+  it('keeps another machine\'s entries a local edit never held, retiring only the ids it owned', () => {
+    const selection = decision({
+      localIds: ['session-a'],
+      repoIds: ['session-a', 'session-c'],
+      anchor: anchor(['session-a', 'session-d']),
+    })
+    expect(selection.publish).toBe(true)
+    expect(selection.publishedIds).toEqual(['session-a', 'session-c'])
+    expect(selection.retiredIds).toEqual(['session-d'])
+    expect(selection.ownedIds).toEqual(['session-a', 'session-d'])
+  })
+
+  it('excludes a repo-archived id from the publication a fresh machine makes', () => {
+    const selection = decision({
+      localIds: ['session-a'],
+      repoIds: ['session-a', 'session-b'],
+      repoArchivedIds: ['session-b'],
+    })
+    expect(selection.publish).toBe(false)
+    expect(selection.publishedIds).toEqual(['session-a'])
+    expect(selection.adoptedIds).toEqual(['session-b'])
+  })
+
+  it('treats a missing repo selection as empty, so a fresh machine only adopts what it holds', () => {
+    const selection = decision({ localIds: [], repoIds: undefined })
+    expect(selection.publish).toBe(false)
+    expect(selection.selectedIds).toEqual([])
+    expect(selection.publishedIds).toEqual([])
+    expect(selection.canSweep).toBe(false)
+    expect(selection.ownedIds).toEqual([])
+  })
+})
+
+describe('assignWorkspaceKey', () => {
+  const base = mintedKey('demo')
+  const input = {
+    workspaceId: 'local-1',
+    name: 'demo',
+    remembered: new Map<string, string>(),
+    repoKeysByName: new Map<string, string>(),
+    claimed: new Set<string>(),
+    existing: new Set<string>(),
+  }
+
+  it('returns the key this workspace was assigned before, even when the repo publishes another', () => {
+    expect(assignWorkspaceKey({
+      ...input,
+      remembered: new Map([['local-1', 'ws-remembered']]),
+      repoKeysByName: new Map([['demo', 'ws-repo']]),
+      claimed: new Set(['ws-repo']),
+      existing: new Set(['ws-repo']),
+    })).toBe('ws-remembered')
+  })
+
+  it('converges on the key the repo already publishes under the same name', () => {
+    expect(assignWorkspaceKey({
+      ...input,
+      repoKeysByName: new Map([['demo', 'ws-repo']]),
+      existing: new Set(['ws-repo']),
+    })).toBe('ws-repo')
+  })
+
+  it('does not reuse a published key another workspace claimed this cycle, minting a fresh one instead', () => {
+    expect(assignWorkspaceKey({
+      ...input,
+      repoKeysByName: new Map([['demo', 'ws-repo']]),
+      claimed: new Set(['ws-repo']),
+      existing: new Set(['ws-repo']),
+    })).toBe(base)
+  })
+
+  it('mints a name-derived key when the repo carries none', () => {
+    expect(base).toMatch(/^ws-[0-9a-f]{10}$/)
+    expect(assignWorkspaceKey({ ...input })).toBe(base)
+  })
+
+  it('suffixes a minted key that is already claimed or already in the repo', () => {
+    expect(assignWorkspaceKey({ ...input, claimed: new Set([base]) })).toBe(`${base}-2`)
+    expect(assignWorkspaceKey({ ...input, claimed: new Set([base, `${base}-2`]) })).toBe(`${base}-3`)
+    expect(assignWorkspaceKey({ ...input, existing: new Set([base]) })).toBe(`${base}-2`)
+  })
+})
+
+describe('foldTitle', () => {
+  it('reads the latest session/title event of the log', () => {
+    expect(foldTitle([...events(1), titleEvent('first', 2), ...events(1, 1), titleEvent('second', 4)]))
+      .toBe('second')
+  })
+
+  it('keeps the previous title when a later title event carries no text', () => {
+    expect(foldTitle([titleEvent('first'), { type: 'session/title', seq: 1, time: 2, data: {} } as SessionEvent]))
+      .toBe('first')
+  })
+
+  it('answers an empty title for a log that carries none', () => {
+    expect(foldTitle([])).toBe('')
+    expect(foldTitle(events(1))).toBe('')
+    expect(foldTitle([{ type: 'session/title', seq: 0, time: 1 } as SessionEvent])).toBe('')
+    expect(foldTitle([{ type: 'session/title', seq: 0, time: 1, data: { title: 7 } } as unknown as SessionEvent])).toBe('')
   })
 })
 
 describe('runSyncCycle import', () => {
-  it('imports a fresh session for a mapped project and attaches it to the workspace', async () => {
+  it('imports a selected artifact into the uniquely named local workspace', async () => {
     const world = deps()
-    world.fs.files.set('projects/demo/session-remote.jsonl', artifactFor('session-remote', 'demo', 3))
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-remote': artifactFor('session-remote', 'ws-a', 3) }))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-remote')]))
     const result = await runSyncCycle(world.deps)
 
     expect(result.imported).toBe(1)
+    expect(result.pending).toEqual([])
+    expect(result.errors).toEqual([])
     expect(world.persistence.created).toEqual(['session-remote'])
     expect(world.persistence.sessions.get('session-remote')!.events).toHaveLength(6)
     expect(world.persistence.sessions.get('session-remote')!.meta.cwd).toBe('/work/demo')
-    expect(world.workspaces.createCalls).toEqual(['/work/demo'])
     expect(world.workspaces.attached.get('/work/demo')).toEqual(['session-remote'])
-    expect(world.fs.files.get(MANIFEST_NAME)).toBe(serializeManifest(['demo']))
+    expect(world.projectionCache.warmed).toEqual(['session-remote'])
+    expect(result.importedIds).toEqual(['session-remote'])
+    // The machine adopts the repo's entry and mirrors it locally.
+    expect(result.adopted).toEqual(['session-remote'])
+    expect(world.fs.localSelection).toEqual(['session-remote'])
   })
 
-  it('skips projects with no mapping', async () => {
+  it('defers a workspace no local workspace is named after to the pending list', async () => {
     const world = deps()
-    world.fs.files.set('projects/other/session-x.jsonl', artifactFor('session-x', 'other', 1))
+    world.fs.seed(repoWorkspace('ws-a', 'renamed', { 'session-remote': artifactFor('session-remote', 'ws-a', 1) }))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-remote')]))
     const result = await runSyncCycle(world.deps)
 
     expect(result.imported).toBe(0)
-    expect(world.persistence.sessions.has('session-x')).toBe(false)
-    expect(world.fs.files.get(MANIFEST_NAME)).toBe(serializeManifest(['demo', 'other']))
+    expect(world.persistence.created).toEqual([])
+    expect(result.pending).toEqual([{ key: 'ws-a', name: 'renamed', sessionIds: ['session-remote'], matches: 0 }])
+    expect(result.errors).toEqual([])
   })
 
-  it('extends a local session when the remote log is a strict superset', async () => {
+  it('defers a workspace several local workspaces share, importing nothing into a guess', async () => {
+    const world = deps()
+    world.workspaces.add('/work/demo-copy', 'demo', 'local-2')
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-remote': artifactFor('session-remote', 'ws-a', 1) }))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-remote')]))
+    const result = await runSyncCycle(world.deps)
+
+    expect(result.imported).toBe(0)
+    expect(world.persistence.created).toEqual([])
+    expect(result.pending).toEqual([{ key: 'ws-a', name: 'demo', sessionIds: ['session-remote'], matches: 2 }])
+  })
+
+  it('lists the pending sessions in id order and only the selected ones', async () => {
+    const world = deps()
+    world.fs.seed(repoWorkspace('ws-a', 'renamed', {
+      'session-b': artifactFor('session-b', 'ws-a', 1),
+      'session-a': artifactFor('session-a', 'ws-a', 1),
+      'session-c': artifactFor('session-c', 'ws-a', 1),
+    }))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-b'), entry('session-a')]))
+    const result = await runSyncCycle(world.deps)
+
+    expect(result.pending).toEqual([{ key: 'ws-a', name: 'renamed', sessionIds: ['session-a', 'session-b'], matches: 0 }])
+  })
+
+  it('imports nothing from a workspace whose artifacts the selection does not cover', async () => {
+    const world = deps()
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-remote': artifactFor('session-remote', 'ws-a', 1) }))
+    world.fs.files.set(selectionRepoPath(), selectionFile([]))
+    const result = await runSyncCycle(world.deps)
+
+    expect(result.imported).toBe(0)
+    expect(world.persistence.created).toEqual([])
+    expect(result.pending).toEqual([])
+  })
+
+  it('extends a local session when the repo artifact is a strict superset', async () => {
     const world = deps()
     world.persistence.seed('session-a', '/work/demo', 3)
-    world.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 5))
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-a': artifactFor('session-a', 'ws-a', 5) }))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-a')]))
     const result = await runSyncCycle(world.deps)
 
     expect(result.imported).toBe(1)
     expect(world.persistence.appendCalls).toEqual([{ id: 'session-a', count: 4 }])
     expect(world.persistence.sessions.get('session-a')!.events).toHaveLength(10)
+    expect(world.workspaces.attached.get('/work/demo')).toEqual(['session-a'])
   })
 
-  it('imports nothing when local equals or extends the remote log', async () => {
+  it('imports nothing when local equals or extends the repo log', async () => {
     const world = deps()
     world.persistence.seed('session-a', '/work/demo', 5)
-    world.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 5))
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-a': artifactFor('session-a', 'ws-a', 5) }))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-a')]))
     let result = await runSyncCycle(world.deps)
     expect(result.imported).toBe(0)
     expect(world.persistence.appendCalls).toEqual([])
 
-    world.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 3))
+    world.fs.files.set(sessionRepoPath('ws-a', SessionId('session-a')), artifactFor('session-a', 'ws-a', 3))
     result = await runSyncCycle(world.deps)
     expect(result.imported).toBe(0)
     expect(world.persistence.appendCalls).toEqual([])
@@ -415,67 +752,51 @@ describe('runSyncCycle import', () => {
   it('preserves a divergent remote log as a conflict copy instead of merging', async () => {
     const world = deps()
     world.persistence.seed('session-a', '/work/demo', 3)
-    const remote = artifactFor('session-a', 'demo', 3).replace('"turn":2', '"turn":99')
-    world.fs.files.set('projects/demo/session-a.jsonl', remote)
+    const remote = artifactFor('session-a', 'ws-a', 3).replace('"turn":2', '"turn":99')
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-a': remote }))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-a')]))
     const result = await runSyncCycle(world.deps)
 
     expect(result.imported).toBe(0)
-    expect(result.conflicts).toEqual(['conflicts/demo/session-a-test-host.jsonl'])
-    expect(world.fs.files.get('conflicts/demo/session-a-test-host.jsonl')).toBe(remote)
+    expect(result.conflicts).toEqual(['conflicts/ws-a/session-a-test-host.jsonl'])
+    expect(world.fs.files.get('conflicts/ws-a/session-a-test-host.jsonl')).toBe(remote)
     expect(world.persistence.appendCalls).toEqual([])
+    // The divergence is recorded against the session's own history.
+    const records = parseRecords(world.fs.files.get(recordsRepoPath('ws-a', SessionId('session-a')))!).records
+    expect(records).toEqual([{ host: 'test-host', at: NOW_ISO, direction: 'pull', events: 0, result: 'conflict' }])
   })
 
   it('skips a repo artifact that ends mid-turn instead of importing a truncated snapshot', async () => {
     const world = deps()
-    world.fs.files.set('projects/demo/session-live.jsonl', artifactForEvents('session-live', 'demo', midTurnEvents()))
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-live': artifactForEvents('session-live', 'ws-a', midTurnEvents()) }))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-live')]))
     const result = await runSyncCycle(world.deps)
 
     expect(result.imported).toBe(0)
     expect(world.persistence.sessions.has('session-live')).toBe(false)
+    expect(result.importedIds).toEqual([])
     expect(result.errors.some(message => message.includes('ends mid-turn'))).toBe(true)
+    // Nothing was transferred, so nothing is recorded either.
+    expect(world.fs.files.has(recordsRepoPath('ws-a', SessionId('session-live')))).toBe(false)
   })
 
-  it('records an error for unparsable artifacts and bad file names', async () => {
+  it('records an error for an unparsable artifact and skips foreign file names', async () => {
     const world = deps()
-    world.fs.files.set('projects/demo/session-bad.jsonl', 'not json\n')
-    world.fs.files.set('projects/demo/README.md', 'hello\n')
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-bad': 'not json\n' }))
+    world.fs.files.set(`${workspaceRepoDir('ws-a')}/README.md`, 'hello\n')
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-bad')]))
     const result = await runSyncCycle(world.deps)
 
     expect(result.imported).toBe(0)
-    expect(result.errors).toHaveLength(2)
-    expect(result.errors[0]).toContain('demo/session-bad')
-    expect(result.errors[1]).toContain('README.md')
-  })
-
-  it('does not attach when the composition mounts no workspace registry', async () => {
-    const world = deps()
-    delete (world.deps as { workspaces?: unknown }).workspaces
-    world.fs.files.set('projects/demo/session-remote.jsonl', artifactFor('session-remote', 'demo', 1))
-    const result = await runSyncCycle(world.deps)
-    expect(result.imported).toBe(1)
-  })
-
-  it('records an attach failure and keeps the imported session', async () => {
-    const world = deps()
-    world.workspaces.failAttachOn = ['/work/demo']
-    world.fs.files.set('projects/demo/session-remote.jsonl', artifactFor('session-remote', 'demo', 1))
-    const result = await runSyncCycle(world.deps)
-
-    expect(result.imported).toBe(1)
-    expect(result.errors.some(message => message.includes('attach'))).toBe(true)
-  })
-
-  it('skips a repo file that disappears between listing and reading', async () => {
-    const world = deps()
-    world.fs.phantom = ['projects/demo/session-remote.jsonl']
-    const result = await runSyncCycle(world.deps)
-    expect(result.imported).toBe(0)
-    expect(result.errors).toEqual([])
+    expect(result.errors).toHaveLength(1)
+    expect(result.errors[0]).toContain('ws-a/session-bad')
+    expect(result.errors[0]).toContain('not valid JSON')
   })
 
   it('creates a header-only session without appending events', async () => {
     const world = deps()
-    world.fs.files.set('projects/demo/session-empty.jsonl', artifactFor('session-empty', 'demo', 0))
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-empty': artifactFor('session-empty', 'ws-a', 0) }))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-empty')]))
     const result = await runSyncCycle(world.deps)
 
     expect(result.imported).toBe(1)
@@ -483,18 +804,51 @@ describe('runSyncCycle import', () => {
     expect(world.persistence.sessions.get('session-empty')!.events).toHaveLength(0)
   })
 
+  it('imports nothing without a workspace registry, reporting every repo workspace as pending', async () => {
+    const world = deps()
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-remote': artifactFor('session-remote', 'ws-a', 1) }))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-remote')]))
+    const result = await runSyncCycle(unregistered(world))
+
+    expect(result.imported).toBe(0)
+    expect(result.pending).toEqual([{ key: 'ws-a', name: 'demo', sessionIds: ['session-remote'], matches: 0 }])
+    expect(result.errors).toEqual([])
+  })
+
+  it('records an attach failure and keeps the imported session', async () => {
+    const world = deps()
+    world.workspaces.failAttachOn = ['/work/demo']
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-remote': artifactFor('session-remote', 'ws-a', 1) }))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-remote')]))
+    const result = await runSyncCycle(world.deps)
+
+    expect(result.imported).toBe(1)
+    expect(result.errors.some(message => message.includes('attach'))).toBe(true)
+    expect(world.warnings.some(message => message.includes('attach'))).toBe(true)
+  })
+
+  it('skips a repo file that disappears between listing and reading', async () => {
+    const world = deps()
+    world.fs.phantom = [sessionRepoPath('ws-a', SessionId('session-remote'))]
+    world.fs.seed(repoWorkspace('ws-a', 'demo'))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-remote')]))
+    const result = await runSyncCycle(world.deps)
+    expect(result.imported).toBe(0)
+    expect(result.errors).toEqual([])
+  })
+
   it('pre-warms the projection cache for created and extended sessions', async () => {
     const fresh = deps()
-    fresh.fs.files.set('projects/demo/session-remote.jsonl', artifactFor('session-remote', 'demo', 3))
-    const freshResult = await runSyncCycle(fresh.deps)
-    expect(freshResult.imported).toBe(1)
+    fresh.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-remote': artifactFor('session-remote', 'ws-a', 3) }))
+    fresh.fs.files.set(selectionRepoPath(), selectionFile([entry('session-remote')]))
+    expect((await runSyncCycle(fresh.deps)).imported).toBe(1)
     expect(fresh.projectionCache.warmed).toEqual(['session-remote'])
 
     const extended = deps()
     extended.persistence.seed('session-a', '/work/demo', 3)
-    extended.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 5))
-    const extendedResult = await runSyncCycle(extended.deps)
-    expect(extendedResult.imported).toBe(1)
+    extended.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-a': artifactFor('session-a', 'ws-a', 5) }))
+    extended.fs.files.set(selectionRepoPath(), selectionFile([entry('session-a')]))
+    expect((await runSyncCycle(extended.deps)).imported).toBe(1)
     expect(extended.projectionCache.warmed).toEqual(['session-a'])
   })
 
@@ -502,31 +856,24 @@ describe('runSyncCycle import', () => {
     const world = deps()
     world.persistence.seed('session-a', '/work/demo', 5)
     world.projectionCache.servedIds.add('session-a')
-    world.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 5))
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-a': artifactFor('session-a', 'ws-a', 5) }))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-a')]))
     let result = await runSyncCycle(world.deps)
     expect(result.imported).toBe(0)
     expect(world.projectionCache.warmed).toEqual([])
 
     // remote-prefix: local already extends the repo, nothing appended.
-    world.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 3))
+    world.fs.files.set(sessionRepoPath('ws-a', SessionId('session-a')), artifactFor('session-a', 'ws-a', 3))
     result = await runSyncCycle(world.deps)
     expect(result.imported).toBe(0)
     expect(world.projectionCache.warmed).toEqual([])
   })
 
-  it('skips warm-up when the composition mounts no projection cache', async () => {
-    const world = deps()
-    delete world.deps.projectionCache
-    world.fs.files.set('projects/demo/session-remote.jsonl', artifactFor('session-remote', 'demo', 1))
-    const result = await runSyncCycle(world.deps)
-    expect(result.imported).toBe(1)
-    expect(result.errors).toEqual([])
-  })
-
   it('contains a warm-up failure and still reports the import', async () => {
     const world = deps()
     world.projectionCache.failOn = ['session-remote']
-    world.fs.files.set('projects/demo/session-remote.jsonl', artifactFor('session-remote', 'demo', 1))
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-remote': artifactFor('session-remote', 'ws-a', 1) }))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-remote')]))
     const result = await runSyncCycle(world.deps)
 
     expect(result.imported).toBe(1)
@@ -536,12 +883,13 @@ describe('runSyncCycle import', () => {
 
   it('reports imported ids for switch-notice arming on create and extend, skipping subagent sessions', async () => {
     const world = deps()
-    world.fs.files.set('projects/demo/session-remote.jsonl', artifactFor('session-remote', 'demo', 3))
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-remote': artifactFor('session-remote', 'ws-a', 3) }))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-remote')]))
     let result = await runSyncCycle(world.deps)
     expect(result.importedIds).toEqual(['session-remote'])
 
     // Extend: the repo grows while local state is a prefix → imported again.
-    world.fs.files.set('projects/demo/session-remote.jsonl', artifactFor('session-remote', 'demo', 5))
+    world.fs.files.set(sessionRepoPath('ws-a', SessionId('session-remote')), artifactFor('session-remote', 'ws-a', 5))
     result = await runSyncCycle(world.deps)
     expect(result.imported).toBe(1)
     expect(result.importedIds).toEqual(['session-remote'])
@@ -553,165 +901,548 @@ describe('runSyncCycle import', () => {
     expect(result.importedIds).toEqual([])
 
     // A subagent session still imports, but never arms a user-chat notice.
-    const subartifact = [
-      JSON.stringify({
-        type: 'dsh-session-sync', version: 1, project: 'demo', inheritedEventCount: 0,
-        session: {
-          version: SESSION_FORMAT_VERSION, id: 'session-sub', createdAt: 1,
-          isSeeded: false, origin: 'subagent', delegationDepth: 0,
-        },
-      }),
-      ...events(1).map(event => JSON.stringify(event)),
-      '',
-    ].join('\n')
-    world.fs.files.set('projects/demo/session-sub.jsonl', subartifact)
+    world.fs.files.set(
+      sessionRepoPath('ws-a', SessionId('session-sub')),
+      artifactForEvents('session-sub', 'ws-a', events(1), { origin: 'subagent' }),
+    )
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-remote'), entry('session-sub')]))
     result = await runSyncCycle(world.deps)
     expect(result.imported).toBe(1)
     expect(result.importedIds).toEqual([])
     expect(world.persistence.created).toContain('session-sub')
   })
+
+  it('writes one pull record per imported session, merged into an existing history', async () => {
+    const world = deps()
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-remote': artifactFor('session-remote', 'ws-a', 2) }))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-remote')]))
+    world.fs.files.set(recordsRepoPath('ws-a', SessionId('session-remote')), JSON.stringify({
+      version: 2,
+      records: [{ host: 'other-host', at: '2026-09-01T00:00:00.000Z', direction: 'push', events: 2, result: 'ok' }],
+    }) + '\n')
+    await runSyncCycle(world.deps)
+
+    const records = parseRecords(world.fs.files.get(recordsRepoPath('ws-a', SessionId('session-remote')))!).records
+    expect(records).toEqual([
+      { host: 'other-host', at: '2026-09-01T00:00:00.000Z', direction: 'push', events: 2, result: 'ok' },
+      { host: 'test-host', at: NOW_ISO, direction: 'pull', events: 4, result: 'ok' },
+    ])
+  })
+
+  it('replaces an unparsable records file with the fresh record and reports it', async () => {
+    const world = deps()
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-remote': artifactFor('session-remote', 'ws-a', 1) }))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-remote')]))
+    world.fs.files.set(recordsRepoPath('ws-a', SessionId('session-remote')), 'broken\n')
+    const result = await runSyncCycle(world.deps)
+
+    expect(result.errors.some(message => message.includes('records unparsable'))).toBe(true)
+    expect(parseRecords(world.fs.files.get(recordsRepoPath('ws-a', SessionId('session-remote')))!).records)
+      .toHaveLength(1)
+  })
+
+  it('reports an unparsable manifest and imports nothing from that workspace', async () => {
+    const world = deps()
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-remote': artifactFor('session-remote', 'ws-a', 1) }))
+    world.fs.files.set(manifestRepoPath('ws-a'), 'broken\n')
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-remote')]))
+    const result = await runSyncCycle(world.deps)
+
+    expect(result.imported).toBe(0)
+    expect(result.errors).toEqual(['workspaces/ws-a/manifest.json: workspace manifest: not valid JSON'])
+  })
 })
 
 describe('runSyncCycle export', () => {
-  it('pushes a mapped session the repo does not carry yet', async () => {
+  it('exports a locally selected session, creating its manifest, artifact, records, and selection entry', async () => {
     const world = deps()
-    world.persistence.seed('session-local', '/work/demo', 2)
-    // Pinned here, selected before: the publish path carries a pin the repo
-    // has never seen, and the export writes its first artifact.
-    await world.workspaces.pinSession(SessionId('session-local'))
-    world.fs.baseline = { firstSeen: true, ownedIds: [], sessionIds: [] }
+    world.persistence.seed('session-a', '/work/demo', 2, { title: 'My session' })
+    world.fs.localSelection = ['session-a']
+    const result = await runSyncCycle(world.deps)
+    const key = mintedKey('demo')
+
+    expect(result.pushed).toBe(1)
+    expect(result.publishedSelection).toEqual(['session-a'])
+    expect(result.errors).toEqual([])
+    expect(world.fs.files.get(manifestRepoPath(key))).toBe(
+      serializeManifest({ key, name: 'demo', updatedAt: NOW_ISO }),
+    )
+
+    const artifact = world.fs.files.get(sessionRepoPath(key, SessionId('session-a')))!
+    expect(artifact).toContain(`"workspace":"${key}"`)
+    expect(artifact).not.toContain('/work/demo')
+    expect(parsePortableSession(artifact, '/local').events).toEqual(events(2).concat(titleEvent('My session', 4)))
+    // The old `projects/` layout is gone: nothing may land outside `workspaces/`.
+    expect([...world.fs.files.keys()].every(rel => !rel.startsWith('projects/'))).toBe(true)
+
+    const records = parseRecords(world.fs.files.get(recordsRepoPath(key, SessionId('session-a')))!).records
+    expect(records).toEqual([{ host: 'test-host', at: NOW_ISO, direction: 'push', events: 5, result: 'ok' }])
+
+    const selection = parseSelection(world.fs.files.get(selectionRepoPath())!)
+    expect(selection).toEqual({
+      host: 'test-host',
+      updatedAt: NOW_ISO,
+      entries: [{
+        id: SessionId('session-a'),
+        key,
+        workspaceName: 'demo',
+        title: 'My session',
+        addedAt: NOW_ISO,
+        addedBy: 'test-host',
+      }],
+    })
+
+    expect(world.fs.localSelection).toEqual(['session-a'])
+    expect(world.fs.localSelectionWrites).toEqual([])
+    expect(world.fs.stateWrites.at(-1)).toEqual({
+      firstSeen: true,
+      syncedIds: [SessionId('session-a')],
+      ownedIds: [SessionId('session-a')],
+      workspaceKeys: [{ workspaceId: 'local-1', key }],
+      updatedAt: NOW_ISO,
+      host: 'test-host',
+    })
+  })
+
+  it('keeps the remembered key and rewrites only the manifest name when a workspace is renamed', async () => {
+    const world = deps()
+    world.workspaces.entries[0]!.title = 'renamed'
+    world.fs.syncState = { ...anchor(['session-a']), workspaceKeys: [{ workspaceId: 'local-1', key: 'ws-old' }] }
+    world.fs.localSelection = ['session-a']
+    world.persistence.seed('session-a', '/work/demo', 1)
+    world.fs.seed(repoWorkspace('ws-old', 'demo'))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-a', 'ws-old')]))
+
     const result = await runSyncCycle(world.deps)
 
     expect(result.pushed).toBe(1)
-    const artifact = world.fs.files.get('projects/demo/session-local.jsonl')
-    expect(artifact).toBeDefined()
-    expect(artifact).toContain('"project":"demo"')
-    expect(artifact).not.toContain('/work/demo')
-    expect(result.publishedPins).toEqual(['session-local'])
+    expect(world.fs.files.has(sessionRepoPath('ws-old', SessionId('session-a')))).toBe(true)
+    expect(world.fs.files.get(manifestRepoPath('ws-old'))).toBe(
+      serializeManifest({ key: 'ws-old', name: 'renamed', updatedAt: NOW_ISO }),
+    )
+    // The key never moves, so the renamed machine still publishes under it.
+    expect(world.fs.localSelectionWrites).toEqual([])
   })
 
-  it('skips exporting a session this machine does not pin', async () => {
+  it('converges on the key the repo publishes under the same workspace name', async () => {
+    const world = deps()
+    world.persistence.seed('session-a', '/work/demo', 1)
+    world.fs.localSelection = ['session-a']
+    world.fs.seed(repoWorkspace('ws-published', 'demo'))
+    world.fs.files.set(selectionRepoPath(), selectionFile([]))
+
+    const result = await runSyncCycle(world.deps)
+    expect(result.pushed).toBe(1)
+    expect(world.fs.files.has(sessionRepoPath('ws-published', SessionId('session-a')))).toBe(true)
+    // The manifest already carried the right name: it is not rewritten.
+    expect(world.fs.files.get(manifestRepoPath('ws-published'))).toBe(serializeManifest({
+      key: 'ws-published', name: 'demo', updatedAt: '2026-09-01T00:00:00.000Z',
+    }))
+    expect(result.publishedSelection).toEqual(['session-a'])
+  })
+
+  it('skips exporting a session this machine has not selected', async () => {
     const world = deps()
     world.persistence.seed('session-local', '/work/demo', 2)
-    world.fs.baseline = { firstSeen: true, ownedIds: [], sessionIds: [] }
     const result = await runSyncCycle(world.deps)
 
     expect(result.pushed).toBe(0)
-    expect(world.fs.files.has('projects/demo/session-local.jsonl')).toBe(false)
+    expect(result.publishedSelection).toBeUndefined()
+    expect([...world.fs.files.keys()].some(rel => rel.endsWith('.jsonl'))).toBe(false)
   })
 
-  it('skips sessions whose cwd does not map to any project', async () => {
+  it('reports a selected session that is not in any local workspace instead of guessing a placement', async () => {
     const world = deps()
     world.persistence.seed('session-elsewhere', '/elsewhere/project', 2)
+    world.fs.localSelection = ['session-elsewhere']
     const result = await runSyncCycle(world.deps)
+
     expect(result.pushed).toBe(0)
-    expect(world.fs.files.has('projects/demo/session-elsewhere.jsonl')).toBe(false)
+    expect(result.publishedSelection).toEqual([])
+    expect(result.errors).toEqual([
+      'export session-elsewhere: session is not in any local workspace',
+      'selection: cannot publish session-elsewhere — this machine cannot describe its workspace',
+    ])
+    expect([...world.fs.files.keys()].some(rel => rel.endsWith('.jsonl'))).toBe(false)
   })
 
-  it('leaves the repo file untouched when local equals it', async () => {
+  it('reports a selected session whose header carries no cwd', async () => {
+    const world = deps()
+    world.persistence.noCwdList = ['session-nocwd']
+    world.fs.localSelection = ['session-nocwd']
+    const result = await runSyncCycle(world.deps)
+
+    expect(result.pushed).toBe(0)
+    expect(result.errors).toEqual([
+      'export session-nocwd: session header carries no cwd',
+      'selection: cannot publish session-nocwd — this machine cannot describe its workspace',
+    ])
+  })
+
+  it('skips a listed session whose log is gone and exports nothing for it', async () => {
+    const world = deps()
+    world.persistence.phantomList = ['session-gone']
+    world.fs.localSelection = ['session-gone']
+    // The workspace registry resolves the path, but the log read answers undefined.
+    const result = await runSyncCycle(world.deps)
+    expect(result.pushed).toBe(0)
+    expect(result.errors).toEqual([
+      'selection: cannot publish session-gone — this machine cannot describe its workspace',
+    ])
+    expect(result.publishedSelection).toEqual([])
+  })
+
+  it('leaves the repo artifact untouched when local equals it', async () => {
     const world = deps()
     world.persistence.seed('session-a', '/work/demo', 3)
-    const remote = artifactFor('session-a', 'demo', 3)
-    world.fs.files.set('projects/demo/session-a.jsonl', remote)
+    const remote = artifactFor('session-a', 'ws-a', 3)
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-a': remote }))
+    world.fs.localSelection = ['session-a']
     const result = await runSyncCycle(world.deps)
+
     expect(result.pushed).toBe(0)
-    expect(world.fs.files.get('projects/demo/session-a.jsonl')).toBe(remote)
+    expect(world.fs.files.get(sessionRepoPath('ws-a', SessionId('session-a')))).toBe(remote)
   })
 
-  it('overwrites the repo file when local extends it', async () => {
+  it('overwrites the repo artifact when local extends it', async () => {
     const world = deps()
     world.persistence.seed('session-a', '/work/demo', 5)
-    world.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 3))
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-a': artifactFor('session-a', 'ws-a', 3) }))
+    world.fs.localSelection = ['session-a']
     const result = await runSyncCycle(world.deps)
+
     expect(result.pushed).toBe(1)
+    const written = world.fs.files.get(sessionRepoPath('ws-a', SessionId('session-a')))!
+    expect(parsePortableSession(written, '/x').events).toEqual(events(5))
+    expect(parseRecords(world.fs.files.get(recordsRepoPath('ws-a', SessionId('session-a')))!).records)
+      .toEqual([{ host: 'test-host', at: NOW_ISO, direction: 'push', events: 10, result: 'ok' }])
   })
 
   it('preserves a divergent repo tail as a conflict copy and leaves the repo artifact untouched', async () => {
     const world = deps()
     world.persistence.seed('session-a', '/work/demo', 3)
-    const remote = artifactFor('session-a', 'demo', 3).replace('"turn":2', '"turn":99')
-    world.fs.files.set('projects/demo/session-a.jsonl', remote)
+    const remote = artifactFor('session-a', 'ws-a', 3).replace('"turn":2', '"turn":99')
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-a': remote }))
+    world.fs.localSelection = ['session-a']
     const result = await runSyncCycle(world.deps)
 
     expect(result.pushed).toBe(0)
-    expect(result.conflicts).toEqual(['conflicts/demo/session-a-test-host.jsonl'])
-    expect(world.fs.files.get('conflicts/demo/session-a-test-host.jsonl')).toBe(remote)
+    expect(result.conflicts).toEqual(['conflicts/ws-a/session-a-test-host.jsonl'])
+    expect(world.fs.files.get('conflicts/ws-a/session-a-test-host.jsonl')).toBe(remote)
     // The repo artifact is never overwritten by a divergent local log.
-    expect(world.fs.files.get('projects/demo/session-a.jsonl')).toBe(remote)
+    expect(world.fs.files.get(sessionRepoPath('ws-a', SessionId('session-a')))).toBe(remote)
   })
 
   it('skips exporting a session whose stored log ends mid-turn', async () => {
     const world = deps()
     world.persistence.seedEvents('session-live', '/work/demo', midTurnEvents())
+    world.fs.localSelection = ['session-live']
     const result = await runSyncCycle(world.deps)
 
     expect(result.pushed).toBe(0)
-    expect(result.errors).toEqual([])
-    expect(world.fs.files.has('projects/demo/session-live.jsonl')).toBe(false)
+    expect(result.errors).toEqual([
+      'selection: cannot publish session-live — this machine cannot describe its workspace',
+    ])
+    expect(world.fs.files.has(sessionRepoPath('ws-a', SessionId('session-live')))).toBe(false)
+    expect(result.publishedSelection).toEqual([])
   })
 
   it('overwrites an unparsable repo artifact and records the failure', async () => {
     const world = deps()
     world.persistence.seed('session-a', '/work/demo', 2)
-    world.fs.files.set('projects/demo/session-a.jsonl', 'broken\n')
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-a': 'broken\n' }))
+    world.fs.localSelection = ['session-a']
     const result = await runSyncCycle(world.deps)
+
     expect(result.pushed).toBe(1)
-    expect(result.errors.some(message => message.includes('unparsable'))).toBe(true)
+    expect(result.errors.some(message => message.includes('unparsable, overwriting'))).toBe(true)
   })
 
   it('reports a contained per-session failure without failing the cycle', async () => {
     const world = deps()
     world.persistence.seed('session-a', '/work/demo', 2)
-    world.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 2))
+    world.fs.localSelection = ['session-a']
     world.persistence.failReadFrom = true
     const result = await runSyncCycle(world.deps)
-    expect(result.errors.some(message => message.includes('readFrom failed'))).toBe(true)
+
+    expect(result.errors).toEqual([
+      'export session-a: reading the local log failed (readFrom failed)',
+      'selection: cannot publish session-a — this machine cannot describe its workspace',
+    ])
+    expect(result.pushed).toBe(0)
+    expect(world.git.calls).toContain('push')
   })
 
-  it('ignores listed headers without a cwd', async () => {
+  it('never re-exports a session the same cycle imported', async () => {
     const world = deps()
-    world.persistence.noCwdList = ['session-nocwd']
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-remote': artifactFor('session-remote', 'ws-a', 2) }))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-remote')]))
     const result = await runSyncCycle(world.deps)
+
+    expect(result.imported).toBe(1)
     expect(result.pushed).toBe(0)
-    expect(result.errors).toEqual([])
   })
 
-  it('skips a listed session whose raw artifact is gone', async () => {
+  it('skips an archived session in the export pass', async () => {
     const world = deps()
-    world.persistence.phantomList = ['session-gone']
+    world.persistence.seed('session-a', '/work/demo', 2)
+    world.fs.localSelection = ['session-a']
+    world.workspaces.archivedIds.push(SessionId('session-a'))
     const result = await runSyncCycle(world.deps)
+
     expect(result.pushed).toBe(0)
+    expect(result.deleted).toBe(0)
+    expect(world.fs.files.has(sessionRepoPath('ws-a', SessionId('session-a')))).toBe(false)
+  })
+
+  it('gives every session of one workspace the same repo key inside a single cycle', async () => {
+    const world = deps()
+    // Both sessions belong to the same workspace and this machine has never
+    // exported it before: the key is minted once and reused, not re-minted (and
+    // therefore suffixed `-2`) for the second session in the same pass.
+    world.persistence.seed('session-a', '/work/demo', 2)
+    world.persistence.seed('session-b', '/work/demo', 2)
+    world.fs.localSelection = ['session-a', 'session-b']
+
+    const result = await runSyncCycle(world.deps)
+
+    const key = mintedKey('demo')
     expect(result.errors).toEqual([])
+    expect(result.pushed).toBe(2)
+    expect(result.publishedSelection).toEqual(['session-a', 'session-b'])
+    for (const id of ['session-a', 'session-b']) {
+      expect(world.fs.files.has(sessionRepoPath(key, SessionId(id)))).toBe(true)
+    }
+    // Exactly two artifacts and one manifest: a second directory for the same
+    // workspace would be a `ws-…-2` sibling.
+    expect([...world.fs.files.keys()].filter(rel => rel.endsWith('.jsonl'))).toHaveLength(2)
+    expect([...world.fs.files.keys()].filter(rel => rel.endsWith('manifest.json'))).toEqual([manifestRepoPath(key)])
+    expect(world.fs.stateWrites.at(-1)?.workspaceKeys).toEqual([{ workspaceId: 'local-1', key }])
+  })
+})
+
+describe('runSyncCycle selection convergence', () => {
+  it('mirrors an adopted selection into this machine\'s own files and anchors it', async () => {
+    const world = deps()
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-remote': artifactFor('session-remote', 'ws-a', 2) }))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-remote')]))
+    const result = await runSyncCycle(world.deps)
+
+    expect(result.adopted).toEqual(['session-remote'])
+    expect(result.dropped).toEqual([])
+    expect(result.publishedSelection).toBeUndefined()
+    expect(world.fs.localSelectionWrites).toEqual([['session-remote']])
+    expect(world.fs.stateWrites).toHaveLength(1)
+    expect(world.fs.stateWrites[0]).toMatchObject({
+      firstSeen: true,
+      syncedIds: [SessionId('session-remote')],
+      ownedIds: [SessionId('session-remote')],
+      host: 'test-host',
+      updatedAt: NOW_ISO,
+    })
+  })
+
+  it('publishes a local removal, retires the artifact with its records, and converges the mirror', async () => {
+    const world = deps()
+    world.persistence.seed('session-a', '/work/demo', 2)
+    world.persistence.seed('session-b', '/work/demo', 2)
+    world.fs.seed(repoWorkspace('ws-a', 'demo', {
+      'session-a': artifactFor('session-a', 'ws-a', 2),
+      'session-b': artifactFor('session-b', 'ws-a', 2),
+    }))
+    world.fs.files.set(recordsRepoPath('ws-a', SessionId('session-b')), JSON.stringify({ version: 2, records: [] }) + '\n')
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-a'), entry('session-b')]))
+    world.fs.syncState = anchor(['session-a', 'session-b'])
+    world.fs.localSelection = ['session-a']
+
+    const first = await runSyncCycle(world.deps)
+
+    expect(first.publishedSelection).toEqual(['session-a'])
+    expect(parseSelection(world.fs.files.get(selectionRepoPath())!).entries.map(item => String(item.id)))
+      .toEqual(['session-a'])
+    // The retired session's repo files are gone from every workspace directory,
+    // and its local log is untouched.
+    expect(world.fs.files.has(sessionRepoPath('ws-a', SessionId('session-b')))).toBe(false)
+    expect(world.fs.files.has(recordsRepoPath('ws-a', SessionId('session-b')))).toBe(false)
+    expect(world.fs.files.has(sessionRepoPath('ws-a', SessionId('session-a')))).toBe(true)
+    expect(world.persistence.sessions.has('session-b')).toBe(true)
+
+    // The next cycle converges the local mirror on the published selection.
+    const second = await runSyncCycle(world.deps)
+    expect(second.publishedSelection).toBeUndefined()
+    expect(world.fs.localSelection).toEqual(['session-a'])
+  })
+
+  it('adopts a repo-side removal only for the ids this machine owns', async () => {
+    const world = deps()
+    world.persistence.seed('session-a', '/work/demo', 2)
+    world.persistence.seed('session-b', '/work/demo', 2)
+    world.fs.seed(repoWorkspace('ws-a', 'demo', {
+      'session-a': artifactFor('session-a', 'ws-a', 2),
+      'session-b': artifactFor('session-b', 'ws-a', 2),
+    }))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-a')]))
+    // session-b was never this machine's to retire: it never owned it.
+    world.fs.syncState = anchor(['session-a', 'session-b'], ['session-a'])
+    world.fs.localSelection = ['session-a', 'session-b']
+
+    const first = await runSyncCycle(world.deps)
+
+    expect(first.dropped).toEqual([])
+    expect(first.deletedUnselected).toBe(0)
+    expect(world.fs.files.has(sessionRepoPath('ws-a', SessionId('session-b')))).toBe(true)
+
+    // Owning it one cycle later is what lets the mirror drop it.
+    const second = await runSyncCycle(world.deps)
+    expect(second.dropped).toEqual(['session-b'])
+    expect(world.fs.localSelection).toEqual(['session-a'])
+  })
+
+  it('adopts a repo-side removal without retiring the artifact it still holds', async () => {
+    const world = deps()
+    world.persistence.seed('session-a', '/work/demo', 2)
+    world.persistence.seed('session-b', '/work/demo', 2)
+    world.fs.seed(repoWorkspace('ws-a', 'demo', {
+      'session-a': artifactFor('session-a', 'ws-a', 2),
+      'session-b': artifactFor('session-b', 'ws-a', 2),
+    }))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-a')]))
+    world.fs.syncState = anchor(['session-a', 'session-b'])
+    world.fs.localSelection = ['session-a', 'session-b']
+
+    const result = await runSyncCycle(world.deps)
+
+    expect(result.dropped).toEqual(['session-b'])
+    expect(result.publishedSelection).toBeUndefined()
+    expect(result.deletedUnselected).toBe(0)
+    expect(world.fs.localSelection).toEqual(['session-a'])
+    // Another machine still holds the artifact; this cycle does not touch it.
+    expect(world.fs.files.has(sessionRepoPath('ws-a', SessionId('session-b')))).toBe(true)
+  })
+
+  it('republishes a local selection whose cycle failed before the push', async () => {
+    const world = deps()
+    world.persistence.seed('session-a', '/work/demo', 2)
+    world.fs.localSelection = ['session-a']
+    world.fs.syncState = anchor([], [])
+    world.fs.files.set(selectionRepoPath(), selectionFile([]))
+    world.git.failAt = 'push'
+
+    await expect(runSyncCycle(world.deps)).rejects.toThrow('git push failed')
+    // The remote never accepted the selection, so the anchor stays untouched.
+    expect(world.fs.stateWrites).toEqual([])
+
+    // The next cycle starts from the remote state (`resetHard` discarded the
+    // unpublished write), where the selection still reads as a local edit.
+    world.git.failAt = undefined
+    world.fs.files.set(selectionRepoPath(), selectionFile([]))
+    const second = await runSyncCycle(world.deps)
+
+    expect(second.publishedSelection).toEqual(['session-a'])
+    expect(parseSelection(world.fs.files.get(selectionRepoPath())!).entries.map(item => String(item.id)))
+      .toEqual(['session-a'])
+    expect(world.fs.stateWrites).toHaveLength(1)
+  })
+
+  it('writes the anchor once and only again when the applied selection changes', async () => {
+    const world = deps()
+    world.persistence.seed('session-a', '/work/demo', 2)
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-a': artifactFor('session-a', 'ws-a', 2) }))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-a')]))
+    world.fs.localSelection = ['session-a']
+
+    await runSyncCycle(world.deps)
+    expect(world.fs.stateWrites).toHaveLength(1)
+
+    await runSyncCycle(world.deps)
+    expect(world.fs.stateWrites).toHaveLength(1)
+
+    world.persistence.seed('session-b', '/work/demo', 2)
+    world.fs.localSelection = ['session-a', 'session-b']
+    await runSyncCycle(world.deps)
+    expect(world.fs.stateWrites).toHaveLength(2)
+    expect(world.fs.stateWrites[1]!.syncedIds.map(String)).toEqual(['session-a', 'session-b'])
+  })
+
+  it('records an unparsable selection, gates no artifact on it, and leaves the file alone', async () => {
+    const world = deps()
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-a': artifactFor('session-a', 'ws-a', 2) }))
+    world.fs.files.set(selectionRepoPath(), 'broken\n')
+    // A machine whose local selection still matches its anchor has nothing to
+    // publish, so the unreadable snapshot survives the cycle.
+    world.fs.syncState = anchor([])
+    world.fs.localSelection = []
+
+    const result = await runSyncCycle(world.deps)
+
+    expect(result.imported).toBe(0)
+    expect(result.pushed).toBe(0)
+    expect(result.publishedSelection).toBeUndefined()
+    expect(result.errors).toEqual(['sync.json: selection: not valid JSON'])
+    expect(world.fs.files.get(selectionRepoPath())).toBe('broken\n')
+    expect(world.fs.stateWrites).toEqual([])
+  })
+
+  it('refuses to publish over an unreadable selection when this machine has a local edit', async () => {
+    const world = deps()
+    world.fs.files.set(selectionRepoPath(), 'broken\n')
+    // The anchor says this machine held nothing, and the local selection now
+    // names a session: the decision wants to publish. What it would overwrite
+    // is a snapshot this machine failed to read, so it must not.
+    world.fs.syncState = anchor([])
+    world.fs.localSelection = ['session-a']
+    world.persistence.seed('session-a', '/work/demo', 2)
+
+    const result = await runSyncCycle(world.deps)
+
+    expect(result.publishedSelection).toBeUndefined()
+    expect(world.fs.files.get(selectionRepoPath())).toBe('broken\n')
+    expect(result.errors).toContain('sync.json: refusing to publish over an unreadable selection')
+  })
+
+  it('still publishes when the repository simply has no selection yet', async () => {
+    const world = deps()
+    // Absence is not corruption: this is how the first machine creates the
+    // shared selection, and the guard above must not block it.
+    world.fs.localSelection = ['session-a']
+    world.persistence.seed('session-a', '/work/demo', 2)
+
+    const result = await runSyncCycle(world.deps)
+
+    expect(result.publishedSelection).toEqual(['session-a'])
+    expect(result.errors.filter(message => message.includes('refusing to publish'))).toEqual([])
   })
 })
 
 describe('runSyncCycle archive import', () => {
-  it('leaves an archived artifact unimported while marking locally held sessions', async () => {
+  it('marks locally held sessions from the repo list and never imports their artifacts', async () => {
     const world = deps()
-    world.fs.files.set('projects/demo/session-remote.jsonl', artifactFor('session-remote', 'demo', 1))
-    world.fs.files.set('projects/demo/session-held.jsonl', artifactFor('session-held', 'demo', 1))
     world.persistence.seed('session-held', '/work/demo', 1)
-    world.fs.files.set('projects/demo/archived.json', serializeArchiveList([
+    world.fs.seed(repoWorkspace('ws-a', 'demo', {
+      'session-remote': artifactFor('session-remote', 'ws-a', 1),
+      'session-held': artifactFor('session-held', 'ws-a', 1),
+    }))
+    world.fs.files.set(archiveRepoPath('ws-a'), serializeArchiveList([
       SessionId('session-remote'), SessionId('session-held'), SessionId('session-ghost'),
     ]))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-remote'), entry('session-held')]))
     const result = await runSyncCycle(world.deps)
 
-    // The mark lands before the selection admits artifacts: an archived
-    // session is hidden here and never materializes, and an id this machine
-    // does not hold at all is skipped (the registry refuses unknown ids).
+    // An archived id is excluded from the selection before the import runs: it
+    // never materializes here, and an id this machine does not hold is skipped
+    // (the registry refuses unknown ids).
     expect(result.imported).toBe(0)
     expect(world.persistence.created).toEqual([])
     expect(result.archived).toBe(1)
     expect(world.workspaces.archivedIds.map(String)).toEqual(['session-held'])
   })
 
-  it('marks an already imported local session and skips ids already archived', async () => {
+  it('skips ids already archived', async () => {
     const world = deps()
     world.persistence.seed('session-a', '/work/demo', 1)
     world.workspaces.archivedIds.push(SessionId('session-a'))
-    world.fs.files.set('projects/demo/archived.json', serializeArchiveList([
-      SessionId('session-a'), SessionId('session-b'),
-    ]))
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-a': artifactFor('session-a', 'ws-a', 1) }))
+    world.fs.files.set(archiveRepoPath('ws-a'), serializeArchiveList([SessionId('session-a'), SessionId('session-b')]))
     const result = await runSyncCycle(world.deps)
 
     expect(result.archived).toBe(0)
@@ -720,8 +1451,9 @@ describe('runSyncCycle archive import', () => {
 
   it('records an unparsable archive list and skips its marks', async () => {
     const world = deps()
-    world.fs.files.set('projects/demo/session-remote.jsonl', artifactFor('session-remote', 'demo', 1))
-    world.fs.files.set('projects/demo/archived.json', 'broken\n')
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-remote': artifactFor('session-remote', 'ws-a', 1) }))
+    world.fs.files.set(archiveRepoPath('ws-a'), 'broken\n')
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-remote')]))
     const result = await runSyncCycle(world.deps)
 
     expect(result.imported).toBe(1)
@@ -731,165 +1463,238 @@ describe('runSyncCycle archive import', () => {
 
   it('reports a per-id archive failure and keeps the cycle working', async () => {
     const world = deps()
-    // Held locally, so the mark is addressed to this machine and the
-    // registry's refusal is a contained per-id failure.
     world.persistence.seed('session-held', '/work/demo', 1)
-    world.fs.files.set('projects/demo/archived.json', serializeArchiveList([SessionId('session-held')]))
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-held': artifactFor('session-held', 'ws-a', 1) }))
+    world.fs.files.set(archiveRepoPath('ws-a'), serializeArchiveList([SessionId('session-held')]))
     world.workspaces.failArchiveOn = ['session-held']
     const result = await runSyncCycle(world.deps)
 
     expect(result.archived).toBe(0)
-    expect(result.errors.some(message => message.includes('archive session-held'))).toBe(true)
-    expect(result.errors.length).toBe(1)
+    expect(result.errors).toEqual(['archive session-held in "/work/demo" failed: archive rejected'])
+    expect(world.warnings.some(message => message.includes('archive "session-held" failed'))).toBe(true)
   })
 
   it('skips archive application when the composition mounts no workspace registry', async () => {
     const world = deps()
-    delete (world.deps as { workspaces?: unknown }).workspaces
-    world.fs.files.set('projects/demo/session-remote.jsonl', artifactFor('session-remote', 'demo', 1))
-    world.fs.files.set('projects/demo/archived.json', serializeArchiveList([SessionId('session-remote')]))
-    const result = await runSyncCycle(world.deps)
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-remote': artifactFor('session-remote', 'ws-a', 1) }))
+    world.fs.files.set(archiveRepoPath('ws-a'), serializeArchiveList([SessionId('session-remote')]))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-remote')]))
+    const result = await runSyncCycle(unregistered(world))
 
     // Without a registry there is no archive set to consult, but the repo's
     // own mark still keeps the artifact out: an archived session never syncs.
     expect(result.imported).toBe(0)
     expect(result.archived).toBe(0)
+    // The only artifact under the workspace is archived, so nothing waits for a
+    // matching local workspace.
+    expect(result.pending).toEqual([])
     expect(result.errors).toEqual([])
   })
 })
 
 describe('runSyncCycle archive export', () => {
-  it('unions locally archived owned sessions into the repo archive list', async () => {
+  it('unions locally archived sessions into the repo archive list', async () => {
     const world = deps()
     world.persistence.seed('session-a', '/work/demo', 1)
     world.workspaces.archivedIds.push(SessionId('session-a'))
-    await runSyncCycle(world.deps)
+    // The workspace already has a repo directory, which is what attributes the
+    // mark to its key; the local session is what proves this machine holds it.
+    world.fs.seed(repoWorkspace('ws-a', 'demo'))
+    const result = await runSyncCycle(world.deps)
 
-    expect(world.fs.files.get('projects/demo/archived.json')).toBe(
-      serializeArchiveList([SessionId('session-a')]),
-    )
+    expect(result.errors).toEqual([])
+    expect(world.fs.files.get(archiveRepoPath('ws-a'))).toBe(serializeArchiveList([SessionId('session-a')]))
   })
 
   it('preserves repo marks this machine does not hold and never removes ids', async () => {
     const world = deps()
     world.persistence.seed('session-a', '/work/demo', 1)
     world.workspaces.archivedIds.push(SessionId('session-a'))
-    world.fs.files.set('projects/demo/archived.json', serializeArchiveList([SessionId('session-remote')]))
+    world.fs.seed(repoWorkspace('ws-a', 'demo', {}))
+    world.fs.files.set(archiveRepoPath('ws-a'), serializeArchiveList([SessionId('session-remote')]))
     await runSyncCycle(world.deps)
 
-    expect(world.fs.files.get('projects/demo/archived.json')).toBe(
+    expect(world.fs.files.get(archiveRepoPath('ws-a'))).toBe(
       serializeArchiveList([SessionId('session-a'), SessionId('session-remote')]),
     )
   })
 
-  it('propagates the mark of an archived session deleted locally and purges its repo artifact', async () => {
+  it('propagates the mark of an archived session deleted locally and purges its repo files', async () => {
     const world = deps()
     world.workspaces.archivedIds.push(SessionId('session-gone'))
     // The artifact fails import (as a deleted local session's ghost would), so
-    // only its repo file name attributes the mark to this project.
-    world.fs.files.set('projects/demo/session-gone.jsonl', 'broken\n')
+    // only its repo file name attributes the mark to this workspace.
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-gone': 'broken\n' }))
+    world.fs.files.set(recordsRepoPath('ws-a', SessionId('session-gone')), JSON.stringify({ version: 2, records: [] }) + '\n')
     const result = await runSyncCycle(world.deps)
 
-    expect(result.errors.some(message => message.includes('session-gone'))).toBe(true)
     // The mark is written while the file still exists, and the sweep then
     // deletes the file: the id keeps travelling, the artifact stops.
-    expect(world.fs.files.get('projects/demo/archived.json')).toBe(
-      serializeArchiveList([SessionId('session-gone')]),
-    )
-    expect(world.fs.files.has('projects/demo/session-gone.jsonl')).toBe(false)
+    expect(world.fs.files.get(archiveRepoPath('ws-a'))).toBe(serializeArchiveList([SessionId('session-gone')]))
+    expect(world.fs.files.has(sessionRepoPath('ws-a', SessionId('session-gone')))).toBe(false)
+    expect(world.fs.files.has(recordsRepoPath('ws-a', SessionId('session-gone')))).toBe(false)
     expect(result.deleted).toBe(1)
   })
 
-  it('does not export marks of sessions owned by other projects', async () => {
+  it('does not export marks of sessions owned by another workspace', async () => {
     const world = deps()
     world.persistence.seed('session-elsewhere', '/elsewhere/project', 1)
     world.workspaces.archivedIds.push(SessionId('session-elsewhere'))
     await runSyncCycle(world.deps)
 
-    expect(world.fs.files.has('projects/demo/archived.json')).toBe(false)
+    expect(world.fs.files.has(archiveRepoPath('ws-a'))).toBe(false)
   })
 
   it('leaves the repo archive list untouched when local contributes nothing', async () => {
     const world = deps()
     const existing = serializeArchiveList([SessionId('session-remote')])
-    world.fs.files.set('projects/demo/archived.json', existing)
+    world.fs.seed(repoWorkspace('ws-a', 'demo', {}))
+    world.fs.files.set(archiveRepoPath('ws-a'), existing)
     await runSyncCycle(world.deps)
 
-    expect(world.fs.files.get('projects/demo/archived.json')).toBe(existing)
+    expect(world.fs.files.get(archiveRepoPath('ws-a'))).toBe(existing)
   })
 
   it('overwrites an unparsable repo archive list and records the failure', async () => {
     const world = deps()
     world.persistence.seed('session-a', '/work/demo', 1)
     world.workspaces.archivedIds.push(SessionId('session-a'))
-    world.fs.files.set('projects/demo/archived.json', 'broken\n')
+    world.fs.seed(repoWorkspace('ws-a', 'demo', {}))
+    world.fs.files.set(archiveRepoPath('ws-a'), 'broken\n')
     const result = await runSyncCycle(world.deps)
 
-    expect(world.fs.files.get('projects/demo/archived.json')).toBe(
-      serializeArchiveList([SessionId('session-a')]),
-    )
+    expect(world.fs.files.get(archiveRepoPath('ws-a'))).toBe(serializeArchiveList([SessionId('session-a')]))
     expect(result.errors.some(message => message.includes('unparsable, overwriting'))).toBe(true)
+  })
+
+  it('skips archive export when the composition mounts no workspace registry', async () => {
+    const world = deps()
+    world.persistence.seed('session-a', '/work/demo', 1)
+    world.workspaces.archivedIds.push(SessionId('session-a'))
+    await runSyncCycle(unregistered(world))
+
+    expect(world.fs.files.has(archiveRepoPath('ws-a'))).toBe(false)
   })
 })
 
 describe('runSyncCycle archive deletion', () => {
-  it('deletes the repo artifact of an archived owned session instead of rewriting it', async () => {
+  it('deletes the repo artifact and records of an archived session, keeping the local copy', async () => {
     const world = deps()
     world.persistence.seed('session-a', '/work/demo', 3)
     world.workspaces.archivedIds.push(SessionId('session-a'))
-    world.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 3))
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-a': artifactFor('session-a', 'ws-a', 3) }))
+    world.fs.files.set(recordsRepoPath('ws-a', SessionId('session-a')), JSON.stringify({ version: 2, records: [] }) + '\n')
     const result = await runSyncCycle(world.deps)
 
     expect(result.pushed).toBe(0)
     expect(result.deleted).toBe(1)
-    expect(world.fs.deleted).toEqual(['projects/demo/session-a.jsonl'])
-    expect(world.fs.files.has('projects/demo/session-a.jsonl')).toBe(false)
+    expect(world.fs.deleted).toEqual([
+      sessionRepoPath('ws-a', SessionId('session-a')),
+      recordsRepoPath('ws-a', SessionId('session-a')),
+    ])
+    expect(world.fs.files.has(sessionRepoPath('ws-a', SessionId('session-a')))).toBe(false)
     // The mark still travels; the local copy is untouched.
-    expect(world.fs.files.get('projects/demo/archived.json')).toBe(
-      serializeArchiveList([SessionId('session-a')]),
-    )
+    expect(world.fs.files.get(archiveRepoPath('ws-a'))).toBe(serializeArchiveList([SessionId('session-a')]))
     expect(world.persistence.sessions.get('session-a')!.events).toHaveLength(6)
   })
 
-  it('leaves sessions of other projects and non-archived sessions alone', async () => {
+  it('leaves non-archived artifacts of the same workspace alone', async () => {
     const world = deps()
     world.persistence.seed('session-a', '/work/demo', 1)
     world.persistence.seed('session-b', '/work/demo', 1)
     world.workspaces.archivedIds.push(SessionId('session-a'))
-    world.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 1))
-    world.fs.files.set('projects/demo/session-b.jsonl', artifactFor('session-b', 'demo', 1))
-    world.fs.files.set('projects/demo/session-c.jsonl', artifactFor('session-c', 'demo', 1))
+    world.fs.seed(repoWorkspace('ws-a', 'demo', {
+      'session-a': artifactFor('session-a', 'ws-a', 1),
+      'session-b': artifactFor('session-b', 'ws-a', 1),
+      'session-c': artifactFor('session-c', 'ws-a', 1),
+    }))
     const result = await runSyncCycle(world.deps)
 
     expect(result.deleted).toBe(1)
-    expect(world.fs.files.has('projects/demo/session-a.jsonl')).toBe(false)
-    // session-b is owned and not archived: its content is exported as usual.
-    expect(world.fs.files.has('projects/demo/session-b.jsonl')).toBe(true)
+    expect(world.fs.files.has(sessionRepoPath('ws-a', SessionId('session-a')))).toBe(false)
+    // session-b is held and not archived: its content is exported as usual.
+    expect(world.fs.files.has(sessionRepoPath('ws-a', SessionId('session-b')))).toBe(true)
     // session-c is archived nowhere on this machine: the sweep must not touch it.
-    expect(world.fs.files.has('projects/demo/session-c.jsonl')).toBe(true)
-  })
-
-  it('skips the sweep when the composition mounts no workspace registry', async () => {
-    const noWorkspaces = deps({ workspaces: undefined })
-    noWorkspaces.persistence.seed('session-a', '/work/demo', 1)
-    noWorkspaces.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 1))
-    const result = await runSyncCycle(noWorkspaces.deps)
-
-    expect(result.deleted).toBe(0)
-    expect(noWorkspaces.fs.files.has('projects/demo/session-a.jsonl')).toBe(true)
+    expect(world.fs.files.has(sessionRepoPath('ws-a', SessionId('session-c')))).toBe(true)
   })
 
   it('is a no-op when the archived session has no repo artifact', async () => {
     const world = deps()
     world.persistence.seed('session-a', '/work/demo', 1)
     world.workspaces.archivedIds.push(SessionId('session-a'))
+    world.fs.seed(repoWorkspace('ws-a', 'demo'))
     const result = await runSyncCycle(world.deps)
 
     expect(result.deleted).toBe(0)
     expect(result.errors).toEqual([])
-    expect(world.fs.files.get('projects/demo/archived.json')).toBe(
-      serializeArchiveList([SessionId('session-a')]),
-    )
+    expect(world.fs.files.get(archiveRepoPath('ws-a'))).toBe(serializeArchiveList([SessionId('session-a')]))
+  })
+
+  it('retires the artifact and the records of a de-selected session this machine no longer holds', async () => {
+    const world = deps()
+    // The session's repo files exist, but this machine holds no local log for
+    // it any more: the retirement is driven by the selection alone.
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-a': artifactFor('session-a', 'ws-a', 2) }))
+    world.fs.files.set(recordsRepoPath('ws-a', SessionId('session-a')), JSON.stringify({ version: 2, records: [] }) + '\n')
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-a')]))
+    world.fs.syncState = anchor(['session-a'])
+    world.fs.localSelection = []
+
+    const result = await runSyncCycle(world.deps)
+
+    expect(result.deletedUnselected).toBe(1)
+    expect(result.errors).toEqual([])
+    expect(world.fs.deleted).toEqual([
+      sessionRepoPath('ws-a', SessionId('session-a')),
+      recordsRepoPath('ws-a', SessionId('session-a')),
+      manifestRepoPath('ws-a'),
+    ])
+    // Nothing but the manifest was left, and a manifest describing a workspace
+    // with no artifacts must not keep the directory alive: `rmdir` refuses a
+    // non-empty directory, so the sweep removes the manifest first and the
+    // emptied workspace leaves the repo entirely. A later re-selection reuses
+    // the key remembered in the sync anchor.
+    expect(world.fs.files.has(manifestRepoPath('ws-a'))).toBe(false)
+    expect(world.fs.deletedDirs).toEqual(['workspaces/ws-a'])
+  })
+
+  it('keeps a workspace directory that still carries archive marks', async () => {
+    const world = deps()
+    // The last selected session leaves, but the workspace still holds the
+    // grow-only archive marks of sessions archived elsewhere — those must keep
+    // travelling, so the directory stays.
+    world.fs.seed(repoWorkspace('ws-a', 'demo', { 'session-a': artifactFor('session-a', 'ws-a', 2) }))
+    world.fs.files.set(archiveRepoPath('ws-a'), serializeArchiveList([SessionId('session-archived')]))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-a')]))
+    world.fs.syncState = anchor(['session-a'])
+    world.fs.localSelection = []
+
+    const result = await runSyncCycle(world.deps)
+
+    expect(result.deletedUnselected).toBe(1)
+    expect(world.fs.files.has(archiveRepoPath('ws-a'))).toBe(true)
+    expect(world.fs.files.has(manifestRepoPath('ws-a'))).toBe(true)
+    expect(world.fs.deletedDirs).toEqual([])
+  })
+
+  it('removes a workspace directory once the retirement leaves it without files', async () => {
+    const world = deps()
+    // A manifest-less directory (the fixture's stand-in for a repo written
+    // elsewhere): the sweep reports it and still removes it when it empties.
+    world.fs.files.set(sessionRepoPath('ws-a', SessionId('session-a')), artifactFor('session-a', 'ws-a', 2))
+    world.fs.files.set(selectionRepoPath(), selectionFile([entry('session-a')]))
+    world.fs.syncState = anchor(['session-a'])
+    world.fs.localSelection = []
+
+    const result = await runSyncCycle(world.deps)
+
+    expect(result.deletedUnselected).toBe(1)
+    expect(result.errors).toEqual(['workspaces/ws-a: no manifest.json; skipping this workspace'])
+    expect(world.fs.files.has(sessionRepoPath('ws-a', SessionId('session-a')))).toBe(false)
+    // The empty workspace leaves the repo through a directory removal: `unlink`
+    // cannot remove one, and the EPERM it answers with would land on the cycle
+    // as a spurious error.
+    expect(world.fs.deletedDirs).toEqual(['workspaces/ws-a'])
   })
 })
 
@@ -906,396 +1711,13 @@ describe('runSyncCycle git flow', () => {
     await expect(runSyncCycle(world.deps)).rejects.toThrow('git push failed')
   })
 
-  it('contains a thrown non-Error import failure', async () => {
+  it('contains a thrown non-Error export failure', async () => {
     const world = deps()
     world.persistence.seed('session-a', '/work/demo', 2)
+    world.fs.localSelection = ['session-a']
     world.persistence.throwStringOn = 'inspect'
-    world.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 4))
     const result = await runSyncCycle(world.deps)
-    expect(result.imported).toBe(0)
+    expect(result.pushed).toBe(0)
     expect(result.errors.some(message => message.includes('inspect string failure'))).toBe(true)
   })
 })
-
-
-describe('runSyncCycle pin selection', () => {
-  /** The repo's pin list as an explicit file with `ids` selected. */
-  function selectRepo(world: ReturnType<typeof deps>, ids: readonly string[]): void {
-    world.fs.files.set(PIN_NAME, pinnedFile(ids))
-  }
-
-  /** The ids the repo's pin list carries after a cycle. */
-  function selectedAfter(world: ReturnType<typeof deps>): string[] {
-    const parsed = JSON.parse(world.fs.files.get(PIN_NAME)!) as { sessionIds: string[] }
-    return parsed.sessionIds
-  }
-
-  /** A baseline saying this machine last synced `selection` and owns `owned`. */
-  function baseline(selection: readonly string[], owned: readonly string[] = selection) {
-    return { firstSeen: true, sessionIds: [...selection], ownedIds: [...owned] }
-  }
-
-  it('adopts the repo selection before its first cycle without publishing or retiring anything', async () => {
-    const world = deps()
-    world.persistence.seed('session-a', '/work/demo', 2)
-    world.persistence.seed('session-b', '/work/demo', 2)
-    world.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 2))
-    world.fs.files.set('projects/demo/session-b.jsonl', artifactFor('session-b', 'demo', 2))
-    // The repo already selects session-a; session-b is only local.
-    selectRepo(world, ['session-a'])
-
-    const result = await runSyncCycle(world.deps)
-
-    // The selection mirrors into the registry, and none of this machine's
-    // other sessions is published or retired on a machine that has never
-    // synced (an empty baseline is a fresh machine, not an "unpin all").
-    expect(world.workspaces.pinnedIds.map(String)).toEqual(['session-a'])
-    expect(result.publishedPins).toBeUndefined()
-    expect(result.deletedUnpinned).toBe(0)
-    expect(selectedAfter(world)).toEqual(['session-a'])
-    expect(world.fs.files.has('projects/demo/session-b.jsonl')).toBe(true)
-    expect(world.fs.baseline).toMatchObject({ firstSeen: true, sessionIds: ['session-a'] })
-  })
-
-  it('anchors the baseline on the pins it applied, so a machine that could not mirror an adopted selection adopts it later instead of publishing an empty one', async () => {
-    const world = deps()
-    world.persistence.seed('session-a', '/work/demo', 2)
-    world.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 2))
-    selectRepo(world, ['session-a'])
-
-    // First cycle: the composition mounts no workspace registry, so the
-    // adopted pin has nowhere to land. The port is resolved per cycle, so a
-    // registry can still appear later — the anchor must record the pin set
-    // this machine actually applied, not the one it meant to publish.
-    const first = await runSyncCycle({ ...world.deps, workspaces: undefined })
-    expect(first.pinned).toEqual([])
-    expect(world.fs.baseline).toMatchObject({ firstSeen: true, sessionIds: [], ownedIds: ['session-a'] })
-
-    // Second cycle, registry mounted: the selection is adopted, and nothing
-    // publishes the empty set this machine was never able to hold.
-    const second = await runSyncCycle(world.deps)
-
-    expect(second.pinned).toEqual(['session-a'])
-    expect(world.workspaces.pinnedIds.map(String)).toEqual(['session-a'])
-    expect(second.publishedPins).toBeUndefined()
-    expect(second.deletedUnpinned).toBe(0)
-    expect(selectedAfter(world)).toEqual(['session-a'])
-    expect(world.fs.files.has('projects/demo/session-a.jsonl')).toBe(true)
-  })
-
-  it('does not anchor an adopted pin the registry refused', async () => {
-    const world = deps()
-    world.persistence.seed('session-a', '/work/demo', 2)
-    world.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 2))
-    selectRepo(world, ['session-a'])
-    world.workspaces.failPinOn = ['session-a']
-
-    const first = await runSyncCycle(world.deps)
-
-    expect(first.pinned).toEqual([])
-    expect(world.warnings).toContain('session sync: pin "session-a" failed: pin rejected')
-    expect(world.fs.baseline).toMatchObject({ firstSeen: true, sessionIds: [], ownedIds: ['session-a'] })
-
-    // The refusal was transient: the retry pins, publishes nothing, and still
-    // retires nothing — the anchor never claimed the pin was held.
-    world.workspaces.failPinOn = []
-    const second = await runSyncCycle(world.deps)
-
-    expect(second.pinned).toEqual(['session-a'])
-    expect(second.publishedPins).toBeUndefined()
-    expect(second.deletedUnpinned).toBe(0)
-    expect(selectedAfter(world)).toEqual(['session-a'])
-    expect(world.fs.files.has('projects/demo/session-a.jsonl')).toBe(true)
-  })
-
-  it('keeps a local unpin published on later cycles instead of selecting the session again', async () => {
-    const world = deps()
-    world.persistence.seed('session-a', '/work/demo', 2)
-    world.persistence.seed('session-b', '/work/demo', 2)
-    world.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 2))
-    world.fs.files.set('projects/demo/session-b.jsonl', artifactFor('session-b', 'demo', 2))
-    selectRepo(world, ['session-a', 'session-b'])
-    world.fs.baseline = baseline(['session-a', 'session-b'])
-    await world.workspaces.pinSession(SessionId('session-a'))
-    await world.workspaces.pinSession(SessionId('session-b'))
-    await world.workspaces.unpinSession(SessionId('session-b'))
-
-    const first = await runSyncCycle(world.deps)
-    expect(selectedAfter(world)).toEqual(['session-a'])
-    expect(first.deletedUnpinned).toBe(1)
-
-    // The next cycle must read the pin the user dropped as still dropped: a
-    // baseline anchored on the intended publish would make this machine look
-    // like it had just pinned session-b, publishing it back to the selection.
-    const second = await runSyncCycle(world.deps)
-
-    expect(selectedAfter(world)).toEqual(['session-a'])
-    expect(second.publishedPins).toBeUndefined()
-    expect(world.workspaces.pinnedIds.map(String)).toEqual(['session-a'])
-  })
-
-  it('removes a project directory once its last artifact is retired', async () => {
-    const world = deps()
-    world.persistence.seed('session-a', '/work/demo', 2)
-    world.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 2))
-    selectRepo(world, ['session-a'])
-    world.fs.baseline = baseline(['session-a'])
-    await world.workspaces.pinSession(SessionId('session-a'))
-    await world.workspaces.unpinSession(SessionId('session-a'))
-
-    const result = await runSyncCycle(world.deps)
-
-    expect(result.deletedUnpinned).toBe(1)
-    expect(result.errors).toEqual([])
-    expect(world.fs.files.has('projects/demo/session-a.jsonl')).toBe(false)
-    // The empty project leaves the repo through a directory removal: `unlink`
-    // cannot remove one, and the EPERM it answers with would land on the
-    // cycle as a spurious error.
-    expect(world.fs.deletedDirs).toEqual(['projects/demo'])
-  })
-
-  it('publishes a local pin, writes its artifact, and selects it on the next cycle without republishing', async () => {
-    const world = deps()
-    world.persistence.seed('session-a', '/work/demo', 2)
-    selectRepo(world, [])
-    world.fs.baseline = { firstSeen: true, ownedIds: [], sessionIds: [] }
-    await world.workspaces.pinSession(SessionId('session-a'))
-
-    const first = await runSyncCycle(world.deps)
-    expect(first.pinned).toEqual([]) // already pinned locally
-    expect(first.pushed).toBe(1)
-    expect(first.publishedPins).toEqual(['session-a'])
-    expect(selectedAfter(world)).toEqual(['session-a'])
-
-    const writesAfterFirst = world.fs.pinWrites.length
-    const second = await runSyncCycle(world.deps)
-    expect(second.publishedPins).toBeUndefined()
-    expect(world.fs.pinWrites.length).toBe(writesAfterFirst)
-  })
-
-  it('republishes a local pin whose cycle failed before the push', async () => {
-    const world = deps()
-    world.persistence.seed('session-a', '/work/demo', 2)
-    selectRepo(world, [])
-    world.fs.baseline = { firstSeen: true, ownedIds: [], sessionIds: [] }
-    await world.workspaces.pinSession(SessionId('session-a'))
-    world.git.failAt = 'push'
-
-    await expect(runSyncCycle(world.deps)).rejects.toThrow('git push failed')
-
-    // The remote never accepted the selection, so the anchor must not record it
-    // as applied: a machine that anchored the intended publish would read its
-    // own pin as held, adopt the remote's older set as a repo-side removal, and
-    // silently drop the pin locally.
-    expect(world.fs.baseline).toMatchObject({ firstSeen: true, sessionIds: [] })
-
-    // The next cycle starts from the remote state (`resetHard` discarded the
-    // unpublished write), where the pin still reads as a local edit.
-    world.git.failAt = undefined
-    world.fs.files.set(PIN_NAME, pinnedFile([]))
-    const second = await runSyncCycle(world.deps)
-
-    expect(second.publishedPins).toEqual(['session-a'])
-    expect(selectedAfter(world)).toEqual(['session-a'])
-    expect(world.workspaces.pinnedIds.map(String)).toEqual(['session-a'])
-  })
-
-  it('adopts a repo-side removal and refuses to retire what it still pins', async () => {
-    const world = deps()
-    world.persistence.seed('session-a', '/work/demo', 2)
-    world.persistence.seed('session-b', '/work/demo', 2)
-    world.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 2))
-    world.fs.files.set('projects/demo/session-b.jsonl', artifactFor('session-b', 'demo', 2))
-    // The other machine dropped session-b from the selection; this machine
-    // still holds both pins locally and has not touched them.
-    selectRepo(world, ['session-a'])
-    world.fs.baseline = baseline(['session-a', 'session-b'])
-    world.workspaces.pinnedIds.push(SessionId('session-b'), SessionId('session-a'))
-
-    const result = await runSyncCycle(world.deps)
-
-    expect(result.unpinned).toEqual(['session-b'])
-    expect(world.workspaces.pinnedIds.map(String)).toEqual(['session-a'])
-    expect(result.publishedPins).toBeUndefined()
-    expect(selectedAfter(world)).toEqual(['session-a'])
-    // The user changed nothing here, so nothing of theirs is retired.
-    expect(result.deletedUnpinned).toBe(0)
-  })
-
-  it('unpins locally, retires the artifact, and stops selecting it', async () => {
-    const world = deps()
-    world.persistence.seed('session-a', '/work/demo', 2)
-    world.persistence.seed('session-b', '/work/demo', 2)
-    world.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 2))
-    world.fs.files.set('projects/demo/session-b.jsonl', artifactFor('session-b', 'demo', 2))
-    selectRepo(world, ['session-a', 'session-b'])
-    world.fs.baseline = baseline(['session-a', 'session-b'])
-    await world.workspaces.pinSession(SessionId('session-a'))
-    await world.workspaces.pinSession(SessionId('session-b'))
-    await world.workspaces.unpinSession(SessionId('session-b'))
-
-    const result = await runSyncCycle(world.deps)
-
-    expect(selectedAfter(world)).toEqual(['session-a'])
-    expect(result.deletedUnpinned).toBe(1)
-    expect(world.fs.files.has('projects/demo/session-b.jsonl')).toBe(false)
-    expect(world.fs.files.has('projects/demo/session-a.jsonl')).toBe(true)
-    // The local session survives: only the repo artifact is retired.
-    expect(world.persistence.sessions.has('session-b')).toBe(true)
-  })
-
-  it('mirrors a repo-side removal without republishing it back', async () => {
-    const world = deps()
-    world.persistence.seed('session-a', '/work/demo', 2)
-    world.persistence.seed('session-b', '/work/demo', 2)
-    world.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 2))
-    world.fs.files.set('projects/demo/session-b.jsonl', artifactFor('session-b', 'demo', 2))
-    // The user pinned both here (so this machine owns both); the other
-    // machine then dropped b from the selection.
-    world.workspaces.pinnedIds.push(SessionId('session-b'), SessionId('session-a'))
-    world.fs.baseline = baseline(['session-a', 'session-b'])
-    selectRepo(world, ['session-a'])
-
-    const result = await runSyncCycle(world.deps)
-
-    expect(result.unpinned).toEqual(['session-b'])
-    expect(world.workspaces.pinnedIds.map(String)).toEqual(['session-a'])
-    expect(result.publishedPins).toBeUndefined()
-    expect(selectedAfter(world)).toEqual(['session-a'])
-  })
-
-  it('keeps a repo-selected id this machine cannot mirror', async () => {
-    const world = deps()
-    world.persistence.seed('session-b', '/work/demo', 2)
-    world.fs.files.set('projects/demo/session-b.jsonl', artifactFor('session-b', 'demo', 2))
-    // The repo selects a session of a project this machine does not hold, and
-    // it is not one of this machine's own pins. The user pins session-b here,
-    // which publishes; the foreign id survives that publish.
-    selectRepo(world, ['session-elsewhere'])
-    world.fs.baseline = baseline(['session-elsewhere'], [])
-    await world.workspaces.pinSession(SessionId('session-b'))
-
-    const result = await runSyncCycle(world.deps)
-
-    // The id this machine cannot hold is not part of its own pins, so the
-    // publish it triggers carries its own set; the foreign id stays reachable
-    // through the repo list for the machine that owns it.
-    expect(result.publishedPins).toEqual(['session-b'])
-    expect(selectedAfter(world)).toEqual(['session-b'])
-    // The repo's id is mirrored; the pin this machine made stays its own.
-    expect(result.pinned).toEqual(['session-elsewhere'])
-    expect(world.workspaces.pinnedIds.map(String)).toEqual(['session-elsewhere', 'session-b'])
-  })
-
-  it('excludes an archived session from the published selection', async () => {
-    const world = deps()
-    world.persistence.seed('session-a', '/work/demo', 2)
-    world.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 2))
-    selectRepo(world, ['session-a'])
-    world.fs.baseline = { firstSeen: true, ownedIds: ['session-a'], sessionIds: ['session-a'] }
-    // Locally pinned once, now archived: the host keeps the two sets
-    // exclusive, so the archived id leaves the selection and its artifact.
-    world.workspaces.pinnedIds.push(SessionId('session-a'))
-    // The user pinned it here, which diverged this machine's set from the
-    // baseline, and then archived it — the host keeps the two sets exclusive,
-    // so the archived id leaves the selection and its artifact.
-    world.workspaces.pinnedIds.push(SessionId('session-a'))
-    world.workspaces.archivedIds.push(SessionId('session-a'))
-    world.fs.baseline = { firstSeen: true, ownedIds: [], sessionIds: [] }
-
-    const result = await runSyncCycle(world.deps)
-
-    expect(result.publishedPins).toEqual([])
-    expect(selectedAfter(world)).toEqual([])
-    // The archived artifact leaves through the archive sweep, which owns that
-    // count; the pin sweep reports nothing because the host already dropped
-    // the pin when it archived the session.
-    expect(result.deleted).toBe(1)
-    expect(result.deletedUnpinned).toBe(0)
-    expect(world.fs.files.has('projects/demo/session-a.jsonl')).toBe(false)
-  })
-
-  it('never delivers an unselected artifact and never retires one it does not track', async () => {
-    const world = deps()
-    world.fs.files.set('projects/demo/session-unpinned.jsonl', artifactFor('session-unpinned', 'demo', 2))
-    selectRepo(world, [])
-    world.fs.baseline = { firstSeen: true, ownedIds: [], sessionIds: ['session-other'] }
-
-    const result = await runSyncCycle(world.deps)
-
-    expect(result.imported).toBe(0)
-    expect(world.persistence.created).toEqual([])
-    // session-unpinned was never in this machine's baseline: this machine did
-    // not retire it, so nothing deletes an artifact another machine owns.
-    expect(result.deletedUnpinned).toBe(0)
-    expect(world.fs.files.has('projects/demo/session-unpinned.jsonl')).toBe(true)
-  })
-
-  it('reports an unparsable pin list and gates no artifact on it', async () => {
-    const world = deps()
-    world.fs.files.set('projects/demo/session-a.jsonl', artifactFor('session-a', 'demo', 2))
-    world.fs.files.set(PIN_NAME, 'broken\n')
-
-    const result = await runSyncCycle(world.deps)
-
-    expect(result.imported).toBe(0)
-    expect(result.publishedPins).toBeUndefined()
-    expect(result.errors.some(message => message.includes('pin list'))).toBe(true)
-    expect(world.fs.files.get(PIN_NAME)).toBe('broken\n')
-  })
-
-  it('writes the baseline once and only again when the applied selection changes', async () => {
-    const world = deps()
-    world.persistence.seed('session-a', '/work/demo', 2)
-    selectRepo(world, ['session-a'])
-    world.workspaces.pinnedIds.push(SessionId('session-a'))
-
-    await runSyncCycle(world.deps)
-    const writes = world.fs.baselineWrites.length
-    expect(writes).toBe(1)
-    expect(world.fs.baselineWrites[0]).toMatchObject({ firstSeen: true, sessionIds: ['session-a'] })
-
-    await runSyncCycle(world.deps)
-    expect(world.fs.baselineWrites.length).toBe(writes)
-
-    world.workspaces.pinnedIds.push(SessionId('session-b'))
-    await runSyncCycle(world.deps)
-    expect(world.fs.baselineWrites.length).toBe(writes + 1)
-  })
-
-  it('pins an adopted id whose artifact arrived in the same cycle', async () => {
-    const world = deps()
-    world.fs.files.set('projects/demo/session-remote.jsonl', artifactFor('session-remote', 'demo', 2))
-    selectRepo(world, ['session-remote'])
-    world.fs.baseline = { firstSeen: true, ownedIds: [], sessionIds: [] }
-
-    const result = await runSyncCycle(world.deps)
-
-    expect(result.imported).toBe(1)
-    expect(result.pinned).toEqual(['session-remote'])
-    expect(world.workspaces.pinnedIds.map(String)).toEqual(['session-remote'])
-    // The adopted artifact is not re-exported from the log it just came from.
-    expect(result.pushed).toBe(0)
-  })
-
-  it('contains a pin the host refuses and keeps the cycle going', async () => {
-    const world = deps()
-    world.fs.files.set('projects/demo/session-remote.jsonl', artifactFor('session-remote', 'demo', 2))
-    selectRepo(world, ['session-remote'])
-    world.fs.baseline = { firstSeen: true, ownedIds: [], sessionIds: [] }
-    world.workspaces.failPinOn = ['session-remote']
-
-    const result = await runSyncCycle(world.deps)
-
-    expect(result.imported).toBe(1)
-    expect(result.pinned).toEqual([])
-    expect(world.warnings.some(message => message.includes('pin "session-remote" failed'))).toBe(true)
-    // The refusal is not recorded as a held pin: the anchor carries what this
-    // machine applied, so the next cycle retries the pin instead of reading its
-    // absence as a local unpin and publishing the removal.
-    expect(world.fs.baseline).toMatchObject({ sessionIds: [], ownedIds: ['session-remote'] })
-  })
-})
-
-
-

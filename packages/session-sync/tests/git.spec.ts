@@ -125,8 +125,15 @@ describe('GitRepository', () => {
   it('rejects a failed command as a GitError carrying the exit code', async () => {
     const root = await newRoot('dsh-sync-git-error-')
     const remote = await initBare(join(root, 'remote.git'))
-    const repo = new GitRepository(join(root, 'work'), NO_RETRY)
+    const work = join(root, 'work')
+    const repo = new GitRepository(work, NO_RETRY)
     await repo.ensure(remote, 'main')
+    // The branch has to exist for the push to be attempted at all: an unborn
+    // branch is a deliberate no-op (see the next test), so this case needs one
+    // real commit before the bogus refspec can be rejected by git.
+    await writeFile(join(work, 'seed.txt'), 'seed\n')
+    await repo.addAll()
+    await repo.commit('seed')
     await expect(repo.push('no-such-branch')).rejects.toBeInstanceOf(GitError)
     const failure = await repo.push('no-such-branch').then(
       () => { throw new Error('push unexpectedly resolved') },
@@ -134,6 +141,19 @@ describe('GitRepository', () => {
     )
     expect(failure).toBeInstanceOf(GitError)
     expect((failure as GitError).message).toContain('git push -u failed')
+  })
+
+  it('treats a push on an unborn branch as a no-op instead of a failure', async () => {
+    const root = await newRoot('dsh-sync-git-unborn-')
+    const remote = await initBare(join(root, 'remote.git'))
+    const repo = new GitRepository(join(root, 'work'), NO_RETRY)
+    await repo.ensure(remote, 'main')
+    // Nothing was ever committed: a cycle that wrote no files ends clean
+    // rather than reporting a missing refspec on the very first push.
+    expect(await repo.commitCount()).toBe(0)
+    await expect(repo.push('main')).resolves.toBeUndefined()
+    const heads = (await execFileAsync('git', ['ls-remote', '--heads', remote, 'main'])).stdout.trim()
+    expect(heads).toBe('')
   })
 
   it('resetHard is a no-op when no fetch ran before it', async () => {

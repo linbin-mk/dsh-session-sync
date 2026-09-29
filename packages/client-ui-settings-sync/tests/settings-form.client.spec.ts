@@ -2,12 +2,12 @@
 /**
  * Draft-and-save model of the sync settings form: the patch holds exactly the
  * changed fields, and validation names the mistake the old immediate-commit
- * form used to send to the host (adding a second project with the first row's
- * path was refused there with `duplicate mapping path`).
+ * form used to send to the host. v2 removed the project-mapping list, so the
+ * mapping rules that used to live here are gone with it.
  */
 import { describe, expect, it } from 'vitest'
 import {
-  cleanMappings, draftFromSettings, isDirty, settingsPatch, settingsSignature, validateDraft,
+  draftFromSettings, isDirty, settingsPatch, settingsSignature, validateDraft,
 } from '../src/client/settings-form.ts'
 import type { ValidationCopy } from '../src/client/settings-form.ts'
 import type { SyncSettingsDraft } from '../src/client/controller.ts'
@@ -16,10 +16,6 @@ const copy: ValidationCopy = {
   remoteRequired: 'remote required',
   branchBlank: 'branch blank',
   intervalInvalid: 'interval invalid',
-  mappingKeyBlank: (row: number) => `key blank ${row}`,
-  mappingPathBlank: (row: number) => `path blank ${row}`,
-  mappingKeyDuplicate: (key: string) => `key dup ${key}`,
-  mappingPathDuplicate: (path: string) => `path dup ${path}`,
 }
 
 function settings(overrides: Partial<SyncSettingsDraft> = {}): SyncSettingsDraft {
@@ -28,7 +24,6 @@ function settings(overrides: Partial<SyncSettingsDraft> = {}): SyncSettingsDraft
     remote: 'git@example.com:team/repo.git',
     branch: 'main',
     intervalMinutes: 5,
-    mappings: [{ key: 'demo', path: '/work/demo' }],
     cleanup: { enabled: false, periodHours: 24, keepCommits: 200 },
     ...overrides,
   }
@@ -39,7 +34,7 @@ describe('settingsSignature and isDirty', () => {
     const base = settings()
     expect(isDirty(settings(), base)).toBe(false)
     expect(isDirty(settings({ branch: 'dev' }), base)).toBe(true)
-    expect(isDirty(settings({ mappings: [{ key: 'demo', path: '/work/other' }] }), base)).toBe(true)
+    expect(isDirty(settings({ enabled: false }), base)).toBe(true)
     expect(isDirty(settings({ cleanup: { enabled: true, periodHours: 24, keepCommits: 200 } }), base)).toBe(true)
   })
 
@@ -47,10 +42,9 @@ describe('settingsSignature and isDirty', () => {
     expect(settingsSignature(settings())).toBe(settingsSignature(draftFromSettings(settings())))
   })
 
-  it('is order-sensitive for the mapping list, because the order is stored', () => {
-    const two = settings({ mappings: [{ key: 'a', path: '/a' }, { key: 'b', path: '/b' }] })
-    const swapped = settings({ mappings: [{ key: 'b', path: '/b' }, { key: 'a', path: '/a' }] })
-    expect(isDirty(swapped, two)).toBe(true)
+  it('ignores surrounding whitespace, which the host trims before storing', () => {
+    const padded = settings({ remote: ' git@example.com:team/repo.git ', branch: ' main ' })
+    expect(isDirty(padded, settings())).toBe(false)
   })
 })
 
@@ -60,8 +54,7 @@ describe('settingsPatch', () => {
   })
 
   it('holds only the changed fields', () => {
-    const patch = settingsPatch(settings({ branch: 'dev' }), settings())
-    expect(patch).toEqual({ branch: 'dev' })
+    expect(settingsPatch(settings({ branch: 'dev' }), settings())).toEqual({ branch: 'dev' })
   })
 
   it('sends a nested cleanup patch for one changed cleanup field', () => {
@@ -69,37 +62,23 @@ describe('settingsPatch', () => {
     expect(settingsPatch(draft, settings())).toEqual({ cleanup: { enabled: true } })
   })
 
-  it('trims mapping text and remote/branch before writing', () => {
-    const draft = settings({
-      remote: ' git@example.com:team/repo.git ',
-      branch: ' dev ',
-      mappings: [{ key: ' demo ', path: ' /work/demo ' }],
-    })
+  it('trims the text fields before writing', () => {
+    const draft = settings({ remote: ' git@example.com:team/repo.git ', branch: ' dev ' })
     expect(settingsPatch(draft, settings())).toEqual({ branch: 'dev' })
   })
 
-  it('writes the mapping list for a structural change', () => {
-    const draft = settings({
-      mappings: [{ key: 'demo', path: '/work/demo' }, { key: 'server', path: '/work/server' }],
-    })
-    expect(settingsPatch(draft, settings())).toEqual({
-      mappings: [{ key: 'demo', path: '/work/demo' }, { key: 'server', path: '/work/server' }],
-    })
-  })
-
   it('treats a whitespace-only edit as no change at all', () => {
-    const draft = settings({ branch: ' main ', mappings: [{ key: ' demo', path: '/work/demo ' }] })
-    // The host stores trimmed values, so the draft is not dirty and there is
-    // no patch to write.
+    const draft = settings({ branch: ' main ' })
     expect(isDirty(draft, settings())).toBe(false)
     expect(settingsPatch(draft, settings())).toBeUndefined()
   })
-})
 
-describe('cleanMappings', () => {
-  it('trims every row and leaves the order alone', () => {
-    expect(cleanMappings([{ key: ' a ', path: ' /a ' }, { key: 'b', path: '/b' }]))
-      .toEqual([{ key: 'a', path: '/a' }, { key: 'b', path: '/b' }])
+  it('carries no mapping field, whatever the section used to hold', () => {
+    // A stray legacy key on the resolved section is not part of the draft any
+    // more, so an old document cannot smuggle one into a write.
+    const host = settings() as SyncSettingsDraft & { mappings?: unknown }
+    host.mappings = [{ key: 'demo', path: '/work/demo' }]
+    expect(settingsPatch(settings({ branch: 'dev' }), host)).toEqual({ branch: 'dev' })
   })
 })
 
@@ -123,31 +102,23 @@ describe('validateDraft', () => {
       .toEqual([{ field: 'interval', message: 'interval invalid' }])
   })
 
-  it('names the row of an incomplete mapping — the "add project" dead end', () => {
-    const draft = settings({
-      mappings: [{ key: 'demo', path: '/work/demo' }, { key: '', path: '' }],
-    })
-    expect(validateDraft(draft, copy)).toEqual([
-      { field: 'mappings', message: 'key blank 2' },
-      { field: 'mappings', message: 'path blank 2' },
+  it('names every issue at once, in field order', () => {
+    expect(validateDraft(settings({ remote: '', branch: '', intervalMinutes: -1 }), copy)).toEqual([
+      { field: 'remote', message: 'remote required' },
+      { field: 'branch', message: 'branch blank' },
+      { field: 'interval', message: 'interval invalid' },
     ])
   })
+})
 
-  it('catches the duplicate path the host used to refuse after the fact', () => {
-    const draft = settings({
-      mappings: [{ key: 'demo', path: '/work/demo' }, { key: 'other', path: '/work/demo' }],
-    })
-    expect(validateDraft(draft, copy)).toEqual([
-      { field: 'mappings', message: 'path dup /work/demo' },
-    ])
-  })
+describe('draftFromSettings', () => {
+  it('copies the section so edits never mutate what the host holds', () => {
+    const host = settings()
+    const draft = draftFromSettings(host)
+    expect(draft).toEqual(host)
 
-  it('catches duplicate keys and ignores whitespace-only differences', () => {
-    const draft = settings({
-      mappings: [{ key: 'demo', path: '/a' }, { key: ' demo ', path: '/b' }],
-    })
-    expect(validateDraft(draft, copy)).toEqual([
-      { field: 'mappings', message: 'key dup demo' },
-    ])
+    draft.cleanup.keepCommits = 5
+    expect(host.cleanup.keepCommits).toBe(200)
+    expect(draft.cleanup.keepCommits).toBe(5)
   })
 })

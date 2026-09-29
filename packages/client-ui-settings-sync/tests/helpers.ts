@@ -8,9 +8,14 @@
  */
 
 import { useMemo, useSyncExternalStore } from 'react'
+import { vi } from 'vitest'
+import type { Mock } from 'vitest'
 import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
 import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
+import type {
+  SessionSyncRecord, SessionSyncSelectionView, SessionSyncStatusView,
+} from '@linbin-mk/dsh-session-sync'
 
 /**
  * Bind a bare snapshot source to a selector hook. Vendored from the retired
@@ -124,29 +129,35 @@ export class FakeLocale {
   }
 }
 
-/** Minimal `remote` service: records listeners and dispatches payloads at them. */
+/**
+ * Minimal `remote` service: records listeners and dispatches the Host
+ * argument list at them. The real `$on` spreads that list into the listener
+ * (`(ns, revision) => …`, not `(payload) => …`), so this double does too —
+ * the fake's own shape is part of what a spec proves about the plugin.
+ */
 export class FakeRemote {
-  private readonly listeners = new Map<string, Array<(payload: unknown) => void>>()
+  private readonly listeners = new Map<string, Array<(...args: unknown[]) => void>>()
 
-  $on(event: string, listener: (payload: unknown) => void): () => void {
+  $on(event: string, listener: (...args: never[]) => void): () => void {
     const list = this.listeners.get(event) ?? []
-    list.push(listener)
+    list.push(listener as (...args: unknown[]) => void)
     this.listeners.set(event, list)
     return () => {
-      const at = list.indexOf(listener)
+      const at = list.indexOf(listener as (...args: unknown[]) => void)
       if (at !== -1) list.splice(at, 1)
     }
   }
 
-  $dispatch(event: string, payload: unknown): void {
-    for (const listener of this.listeners.get(event) ?? []) listener(payload)
+  /** Deliver one forwarded event's Host argument list, verbatim. */
+  $dispatch(event: string, args: readonly unknown[] = []): void {
+    for (const listener of this.listeners.get(event) ?? []) listener(...args)
   }
 }
 
 /** Options of {@link FakeConfigForm}. */
 export interface FakeConfigFormOptions<T = Record<string, unknown>> {
   /** Section the Host serves; fields may be absent (the page decodes fallbacks). Omit to model an entry this client is not served. */
-  value?: Record<string, unknown>
+  value?: T
   /** Whether the Host document accepts writes; defaults to the section's presence. */
   writable?: boolean
   /** `host` syncs with the Host document; `memory` keeps the page process-local. */
@@ -195,7 +206,7 @@ export class FakeConfigForm<T = Record<string, unknown>> implements ConfigForm<T
   constructor(options: FakeConfigFormOptions<T> = {}) {
     this.snapshot = {
       status: options.value === undefined ? 'unavailable' : 'ready',
-      value: options.value as T | undefined,
+      value: options.value,
       base: undefined,
       user: undefined,
       revision: options.value === undefined ? undefined : 1,
@@ -234,12 +245,14 @@ export class FakeConfigForm<T = Record<string, unknown>> implements ConfigForm<T
     this.writes.push([...ops])
     let next = this.snapshot.value as Record<string, unknown> | undefined
     for (const op of ops) next = applyOp(next, op)
-    this.publish(next)
+    // The merged section is the form's own value type again (the caller owns
+    // the JSON data; the ops are what made it untyped for a moment).
+    this.publish(next as T | undefined)
     return true
   }
 
   /** Publish a section as a Host commit would (another editor's write). */
-  publish(value: Record<string, unknown> | undefined): void {
+  publish(value: T | undefined): void {
     this.snapshot = {
       ...this.snapshot,
       status: value === undefined ? 'unavailable' : 'ready',
@@ -280,5 +293,107 @@ export class FakeConfigForms {
     const form = new FakeConfigForm()
     this.forms.set(entryId, form)
     return form
+  }
+}
+
+/** The default status view the doubles answer with (an unconfigured plugin). */
+export function statusView(overrides: Partial<SessionSyncStatusView> = {}): SessionSyncStatusView {
+  return {
+    configured: false,
+    repoReady: false,
+    running: false,
+    syncedCount: 0,
+    pending: [],
+    lastRun: {
+      imported: 0, pushed: 0, archived: 0, deleted: 0, deletedUnselected: 0,
+      adopted: 0, dropped: 0, conflicts: [],
+    },
+    ...overrides,
+  }
+}
+
+/** The default selection view the doubles answer with (nothing selected). */
+export function selectionView(overrides: Partial<SessionSyncSelectionView> = {}): SessionSyncSelectionView {
+  return { workspaces: [], pending: [], total: 0, ...overrides }
+}
+
+/** One session row of a selection tree, with the fields a view always carries. */
+export function selectionSession(
+  overrides: Partial<SessionSyncSelectionView['workspaces'][number]['sessions'][number]> & { id: string },
+): SessionSyncSelectionView['workspaces'][number]['sessions'][number] {
+  return { title: overrides.id, present: true, conflicts: 0, ...overrides }
+}
+
+/** The plugin's HTTP face as a spec drives it: every method is a spy. */
+export interface FakeSyncApi {
+  status: Mock
+  getSelection: Mock
+  selectSession: Mock
+  closeSession: Mock
+  getRecords: Mock
+  syncNow: Mock
+  cleanupNow: Mock
+  logs: Mock
+  getSettings: Mock
+  updateSettings: Mock
+}
+
+/** Options of {@link fakeSyncApi}. */
+export interface FakeSyncApiOptions {
+  /** The section the plugin's own route serves. */
+  settingsValue?: unknown
+  /** Whether that route reports writes accepted. */
+  writable?: boolean
+  /** The status view every status read answers with. */
+  status?: SessionSyncStatusView
+  /** The selection view every selection read answers with. */
+  selection?: SessionSyncSelectionView
+  /** The records every records read answers with. */
+  records?: SessionSyncRecord[]
+  /** The cycle log every log read answers with. */
+  logs?: unknown[]
+  /** Make `getSelection` reject with this message. */
+  selectionError?: string
+  /** Make `syncNow` reject with this message. */
+  syncNowError?: string
+  /** Make the session mutations reject with this message. */
+  sessionError?: string
+  /** Make `getRecords` reject with this message. */
+  recordsError?: string
+}
+
+/**
+ * One in-memory stand-in for the whole wire face. Reads answer from the
+ * fixture views; the mutations answer the same selection view and record
+ * their call, which is what a spec asserts on.
+ * @param options - the fixture views and the failures to inject.
+ * @returns the spy-backed API double.
+ */
+export function fakeSyncApi(options: FakeSyncApiOptions = {}): FakeSyncApi {
+  const base = options.selection ?? selectionView()
+  return {
+    status: vi.fn(() => Promise.resolve(options.status ?? statusView())),
+    getSelection: vi.fn(() => options.selectionError === undefined
+      ? Promise.resolve(base)
+      : Promise.reject(new Error(options.selectionError))),
+    selectSession: vi.fn((id: string) => options.sessionError === undefined
+      ? Promise.resolve(base)
+      : Promise.reject(new Error(options.sessionError))),
+    closeSession: vi.fn((id: string) => options.sessionError === undefined
+      ? Promise.resolve(base)
+      : Promise.reject(new Error(options.sessionError))),
+    getRecords: vi.fn(() => options.recordsError === undefined
+      ? Promise.resolve(options.records ?? [])
+      : Promise.reject(new Error(options.recordsError))),
+    syncNow: vi.fn(() => options.syncNowError === undefined
+      ? Promise.resolve(options.status ?? statusView())
+      : Promise.reject(new Error(options.syncNowError))),
+    cleanupNow: vi.fn(() => Promise.resolve(options.status ?? statusView())),
+    logs: vi.fn(() => Promise.resolve(options.logs ?? [])),
+    getSettings: vi.fn(() => Promise.resolve({
+      writable: options.writable ?? true,
+      settings: options.settingsValue ?? { enabled: false, remote: '', branch: 'main', intervalMinutes: 5 },
+    })),
+    updateSettings: vi.fn(() => Promise.resolve()),
   }
 }

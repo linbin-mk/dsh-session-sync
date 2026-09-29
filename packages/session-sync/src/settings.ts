@@ -1,10 +1,14 @@
 /**
  * Configuration contract of the session-sync plugin: the live `session-sync`
- * profile entry's section — the git remote, branch, sync cadence, the
- * project-key-to-local-path mappings that decide which projects export and
- * which imported sessions are admitted into this machine's DSH, and the
+ * profile entry's section — the git remote, branch, sync cadence, and the
  * periodic git-space cleanup that truncates the shared history to the newest
  * commits — plus the cross-field validation a schema cannot express.
+ *
+ * There is no mapping field in v2. What synchronizes is the explicit session
+ * selection the user builds from the session row's "..." menu, and an imported
+ * session lands in the local workspace whose title matches the repo
+ * workspace's `manifest.json` name. Machines therefore carry no per-project
+ * configuration at all.
  *
  * The section is the plugin's Cordis Config, so it arrives as the Loader
  * row's config and every editable field is a `.volatile()` reference: the
@@ -36,24 +40,6 @@ export const DEFAULT_CLEANUP_KEEP_COMMITS = 200
 export const DEFAULT_STARTUP_SYNC_DELAY_MS = 3_000
 
 /**
- * Cadence of the pin watchdog, in milliseconds. The user's pin action writes
- * the harness registry directly and the plugin has no notification seam for
- * it, so this timer is the trigger: it compares the local pin set with the
- * last synced baseline and starts a cycle when they diverge. It doubles as
- * the minimum spacing between two watchdog-launched cycles, so a run of pin
- * clicks costs one cycle per interval rather than one per click.
- */
-export const DEFAULT_WATCHDOG_INTERVAL_MS = 30_000
-
-/** One project relationship: the portable key used in the git repo and the machine-local directory. */
-export interface SessionSyncMapping {
-  /** Portable project identity inside the git repo (`projects/<key>/...`). */
-  key: string
-  /** Local directory whose sessions export under `key` and receive imports for it. */
-  path: string
-}
-
-/**
  * Git-space cleanup contract. Git never forgets: a deleted session file only
  * stops consuming space once the history that carried it is rewritten. The
  * periodic cleanup truncates the shared repo history to the newest
@@ -80,8 +66,6 @@ export interface SessionSyncSettings {
   branch: string
   /** Automatic sync cadence in minutes (minimum 1). */
   intervalMinutes: number
-  /** Project relationships: the sync whitelist in both directions. */
-  mappings: SessionSyncMapping[]
   /** Periodic git-space cleanup. */
   cleanup: SessionSyncCleanupSettings
 }
@@ -102,8 +86,6 @@ export interface Config {
   branch: Volatile<string>
   /** Automatic sync cadence in minutes (minimum 1). */
   intervalMinutes: Volatile<number>
-  /** Project relationships: the sync whitelist in both directions. */
-  mappings: Volatile<SessionSyncMapping[]>
   /** Periodic git-space cleanup. */
   cleanup: Volatile<SessionSyncCleanupSettings>
 }
@@ -123,8 +105,6 @@ export interface ConfigInput {
   branch?: string
   /** Automatic sync cadence in minutes (minimum 1). */
   intervalMinutes?: number
-  /** Project relationships: the sync whitelist in both directions. */
-  mappings?: SessionSyncMapping[]
   /** Periodic git-space cleanup. */
   cleanup?: Partial<SessionSyncCleanupSettings>
 }
@@ -136,10 +116,6 @@ export const Config: z<ConfigInput, Config> = z.object({
   remote: z.string().default('').volatile(),
   branch: z.string().default(DEFAULT_BRANCH).volatile(),
   intervalMinutes: z.number().step(1).min(1).default(DEFAULT_INTERVAL_MINUTES).volatile(),
-  mappings: z.array(z.object({
-    key: z.string(),
-    path: z.string(),
-  })).default([]).volatile(),
   cleanup: z.object({
     enabled: z.boolean().default(false),
     periodHours: z.number().step(1).min(1).default(DEFAULT_CLEANUP_PERIOD_HOURS),
@@ -159,7 +135,6 @@ export function readSettings(config: Config): SessionSyncSettings {
     remote: config.remote.get(),
     branch: config.branch.get(),
     intervalMinutes: config.intervalMinutes.get(),
-    mappings: config.mappings.get().map(mapping => ({ key: mapping.key, path: mapping.path })),
     cleanup: {
       enabled: cleanup.enabled,
       periodHours: cleanup.periodHours,
@@ -168,27 +143,16 @@ export function readSettings(config: Config): SessionSyncSettings {
   }
 }
 
-/** Trimmed, non-empty form of a mapping key or path; `undefined` when blank. */
+/** Trimmed, non-empty form of a configured string; `undefined` when blank. */
 function trimmed(value: string): string | undefined {
   const text = value.trim()
   return text.length === 0 ? undefined : text
 }
 
-/** First duplicate value in `values`, or `undefined` when all are distinct. */
-function firstDuplicate(values: readonly string[]): string | undefined {
-  const seen = new Set<string>()
-  for (const value of values) {
-    if (seen.has(value)) return value
-    seen.add(value)
-  }
-  return undefined
-}
-
 /**
  * Cross-field validation the schema cannot express. Refusing the write keeps
  * a misconfigured section from being stored in the first place: an enabled
- * plugin without a remote would silently skip every cycle, and mapping keys
- * or paths that collide would let one relationship shadow another.
+ * plugin without a remote would silently skip every cycle.
  * @param value - the schema-valid resolved section.
  */
 export function validateSessionSyncSettings(value: SessionSyncSettings): void {
@@ -197,23 +161,5 @@ export function validateSessionSyncSettings(value: SessionSyncSettings): void {
   }
   if (trimmed(value.branch) === undefined) {
     throw new Error('session-sync: branch must not be blank')
-  }
-  const keys = value.mappings.map(mapping => trimmed(mapping.key))
-  const paths = value.mappings.map(mapping => trimmed(mapping.path))
-  const blankKey = keys.findIndex(key => key === undefined)
-  if (blankKey !== -1) {
-    throw new Error(`session-sync: mappings[${blankKey}].key must not be blank`)
-  }
-  const blankPath = paths.findIndex(path => path === undefined)
-  if (blankPath !== -1) {
-    throw new Error(`session-sync: mappings[${blankPath}].path must not be blank`)
-  }
-  const duplicateKey = firstDuplicate(keys as string[])
-  if (duplicateKey !== undefined) {
-    throw new Error(`session-sync: duplicate mapping key "${duplicateKey}"`)
-  }
-  const duplicatePath = firstDuplicate(paths as string[])
-  if (duplicatePath !== undefined) {
-    throw new Error(`session-sync: duplicate mapping path "${duplicatePath}"`)
   }
 }

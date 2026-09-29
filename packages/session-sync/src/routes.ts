@@ -1,14 +1,21 @@
 /**
- * HTTP surface of the session-sync plugin: six same-origin routes on the
- * harness web server (registered through the open `webServer` service, so
- * this plugin needs no harness core changes):
+ * HTTP surface of the session-sync plugin: same-origin routes on the harness
+ * web server (registered through the open `webServer` service, so this plugin
+ * needs no harness core changes):
  *
- * - `GET  /session-sync/status`      — the read-only status view
- * - `POST /session-sync/sync-now`    — run one cycle, answer the fresh view
- * - `POST /session-sync/cleanup-now` — run one git-space cleanup, answer the fresh view
- * - `GET  /session-sync/settings`    — the settings view (writable + section)
- * - `POST /session-sync/settings`    — merge a patch into the settings section
- * - `GET  /session-sync/logs`        — recent cycle-log records (newest first)
+ * - `GET    /session-sync/status`            — the read-only status view
+ * - `GET    /session-sync/selection`         — the selection tree (workspaces → sessions)
+ * - `POST   /session-sync/sessions/<id>`     — select a session for synchronization
+ * - `DELETE /session-sync/sessions/<id>`     — close sync for a session
+ * - `GET    /session-sync/sessions/<id>/records` — that session's sync records (newest first)
+ * - `POST   /session-sync/sync-now`          — run one cycle, answer the fresh status view
+ * - `POST   /session-sync/cleanup-now`       — run one git-space cleanup, answer the fresh view
+ * - `GET    /session-sync/settings`          — the settings view (writable + section)
+ * - `POST   /session-sync/settings`          — merge a patch into the settings section
+ * - `GET    /session-sync/logs`              — recent cycle-log records (newest first)
+ *
+ * The session routes ride one prefix registration (`/session-sync/sessions`),
+ * because a session id is not a fixed path segment.
  *
  * Write routes reject cross-origin requests (the Origin header must name this
  * server's own host) and refuse malformed bodies; the settings service
@@ -33,21 +40,59 @@ const MAX_LOG_LIMIT = 500
 
 /** Route pathnames the plugin registers. */
 export const STATUS_PATH = '/session-sync/status'
+export const SELECTION_PATH = '/session-sync/selection'
+export const SESSIONS_PATH = '/session-sync/sessions'
 export const SYNC_NOW_PATH = '/session-sync/sync-now'
 export const CLEANUP_NOW_PATH = '/session-sync/cleanup-now'
 export const SETTINGS_PATH = '/session-sync/settings'
 export const LOGS_PATH = '/session-sync/logs'
 
+/** One session route parsed out of the prefix registration. */
+export type SessionRoute =
+  | { kind: 'session'; id: string }
+  | { kind: 'records'; id: string }
+  | { kind: 'unknown' }
+
+/**
+ * Parse the pathname tail of one `/session-sync/sessions/...` request.
+ * @param pathname - the request's pathname.
+ * @returns the parsed session route.
+ */
+export function parseSessionRoute(pathname: string): SessionRoute {
+  if (!pathname.startsWith(`${SESSIONS_PATH}/`)) return { kind: 'unknown' }
+  const tail = pathname.slice(SESSIONS_PATH.length + 1)
+  const segments = tail.split('/')
+  if (segments.length === 1 && segments[0] !== undefined && segments[0].length > 0) {
+    return { kind: 'session', id: decodeURIComponent(segments[0]) }
+  }
+  if (segments.length === 2 && segments[0] !== undefined && segments[0].length > 0 && segments[1] === 'records') {
+    return { kind: 'records', id: decodeURIComponent(segments[0]) }
+  }
+  return { kind: 'unknown' }
+}
+
 /** The `webServer` route registration face this plugin consumes (a structural slice of the service). */
 export interface SessionSyncWebServer {
-  /** Register one exact-path route; the disposer removes it. */
-  register(route: { kind: 'exact'; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }): () => void
+  /** Register one route; the disposer removes it. */
+  register(route: {
+    kind: 'exact' | 'prefix'
+    path: string
+    handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
+  }): () => void
 }
 
 /** The service face the routes call. */
 export interface SessionSyncRoutesService {
   /** The read-only status view. */
   status(): import('./api.ts').SessionSyncStatusView
+  /** The selection tree (workspaces → sessions) plus the pending list. */
+  selection(): Promise<import('./api.ts').SessionSyncSelectionView>
+  /** Select one session for synchronization; answers the fresh selection tree. */
+  selectSession(id: string): Promise<import('./api.ts').SessionSyncSelectionView>
+  /** Close sync for one session; answers the fresh selection tree. */
+  closeSession(id: string): Promise<import('./api.ts').SessionSyncSelectionView>
+  /** One session's synchronization records, newest first. */
+  sessionRecords(id: string): Promise<import('./format.ts').SessionSyncRecord[]>
   /** Run one cycle on demand, answering the fresh status view. */
   syncNow(): Promise<import('./api.ts').SessionSyncStatusView>
   /** Run one git-space cleanup on demand, answering the fresh status view. */
@@ -104,8 +149,13 @@ function sameOrigin(req: IncomingMessage): boolean {
   }
 }
 
+/** Pathname of a request, without its query string. */
+function pathnameOf(req: IncomingMessage): string {
+  return new URL(req.url ?? '', 'http://localhost').pathname
+}
+
 /**
- * Register the plugin's six routes on the active web server.
+ * Register the plugin's routes on the active web server.
  * @param webServer - the `webServer` service slice (absent deployments register nothing).
  * @param service - the session-sync service answering the routes.
  * @returns the disposer removing every registered route.
@@ -119,6 +169,47 @@ export function registerSessionSyncRoutes(
       kind: 'exact',
       path: STATUS_PATH,
       handler: (_req, res) => { sendJson(res, 200, service.status()) },
+    }),
+    webServer.register({
+      kind: 'exact',
+      path: SELECTION_PATH,
+      handler: async (req, res) => {
+        if (req.method !== 'GET') { sendJson(res, 405, { error: 'method not allowed' }); return }
+        try {
+          sendJson(res, 200, await service.selection())
+        } catch (error) {
+          sendJson(res, 500, { error: messageOf(error) })
+        }
+      },
+    }),
+    webServer.register({
+      kind: 'prefix',
+      path: SESSIONS_PATH,
+      handler: async (req, res) => {
+        const route = parseSessionRoute(pathnameOf(req))
+        if (route.kind === 'unknown') { sendJson(res, 404, { error: 'unknown session route' }); return }
+        if (route.kind === 'records') {
+          if (req.method !== 'GET') { sendJson(res, 405, { error: 'method not allowed' }); return }
+          try {
+            sendJson(res, 200, { records: await service.sessionRecords(route.id) })
+          } catch (error) {
+            sendJson(res, 500, { error: messageOf(error) })
+          }
+          return
+        }
+        if (req.method !== 'POST' && req.method !== 'DELETE') {
+          sendJson(res, 405, { error: 'method not allowed' })
+          return
+        }
+        if (!sameOrigin(req)) { sendJson(res, 403, { error: 'cross-origin request refused' }); return }
+        try {
+          sendJson(res, 200, req.method === 'POST'
+            ? await service.selectSession(route.id)
+            : await service.closeSession(route.id))
+        } catch (error) {
+          sendJson(res, 400, { error: messageOf(error) })
+        }
+      },
     }),
     webServer.register({
       kind: 'exact',

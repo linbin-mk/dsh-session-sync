@@ -8,7 +8,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { mkdir, mkdtemp } from 'node:fs/promises'
+import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DEFAULT_BRANCH, DEFAULT_CLEANUP_KEEP_COMMITS, DEFAULT_CLEANUP_PERIOD_HOURS } from '../src/settings.ts'
@@ -24,14 +24,12 @@ afterEach(() => {
   else process.env.DSH_HOME = previousDshHome
 })
 
-/** A project directory plus a bare git remote a configured plugin can drive. */
-async function bench(): Promise<{ remote: string; project: string }> {
+/** A bare git remote a configured plugin can drive. */
+async function bench(): Promise<{ remote: string }> {
   const root = await mkdtemp(join(tmpdir(), 'dsh-sync-live-'))
   const remote = join(root, 'remote.git')
   await execFileAsync('git', ['init', '--bare', '-b', 'main', remote])
-  const project = join(root, 'project')
-  await mkdir(project, { recursive: true })
-  return { remote, project }
+  return { remote }
 }
 
 /** The section a freshly composed plugin resolves. */
@@ -40,7 +38,6 @@ const DEFAULT_SECTION = {
   remote: '',
   branch: DEFAULT_BRANCH,
   intervalMinutes: 5,
-  mappings: [],
   cleanup: { enabled: false, periodHours: DEFAULT_CLEANUP_PERIOD_HOURS, keepCommits: DEFAULT_CLEANUP_KEEP_COMMITS },
 }
 
@@ -62,7 +59,6 @@ describe('session-sync live configuration', () => {
     await composed.write({
       enabled: true,
       remote: 'git@example.com:team/repo.git',
-      mappings: [{ key: 'demo', path: '/work/demo' }],
     })
 
     // A volatile commit, not an ordinary reload: the running instance stays.
@@ -70,7 +66,6 @@ describe('session-sync live configuration', () => {
     expect(service.getSettings()).toMatchObject({
       enabled: true,
       remote: 'git@example.com:team/repo.git',
-      mappings: [{ key: 'demo', path: '/work/demo' }],
     })
     expect(service.status().configured).toBe(true)
     expect(composed.patchDocument()).toContain('git@example.com:team/repo.git')
@@ -94,7 +89,7 @@ describe('session-sync live configuration', () => {
     previousDshHome = process.env.DSH_HOME
     const composed = await composeSessionSync({ startupSyncDelayMs: 60_000, persistence: fakePersistence() })
     await expect(composed.write({ intervalMinutes: 0 })).rejects.toThrow(/intervalMinutes/)
-    await expect(composed.write({ mappings: 'not-an-array' })).rejects.toThrow(/mappings/)
+    await expect(composed.write({ branch: 5 })).rejects.toThrow(/branch/)
     expect(composed.service.getSettings()).toEqual(DEFAULT_SECTION)
   })
 
@@ -127,37 +122,41 @@ describe('session-sync live configuration', () => {
 
   it('re-arms the automatic cadence from a live interval change', async () => {
     previousDshHome = process.env.DSH_HOME
-    const { remote, project } = await bench()
+    const { remote } = await bench()
+    const composed = await composeSessionSync({
+      startupSyncDelayMs: 60_000,
+      persistence: fakePersistence(),
+      config: {
+        enabled: true,
+        remote,
+        branch: 'main',
+        intervalMinutes: 5,
+      },
+    })
+    const completed: unknown[] = []
+    composed.ctx.on('session-sync/completed', (payload) => { completed.push(payload) })
+    // The first cycle runs on the real clock: it drives git, whose retry
+    // backoff sleeps on `setTimeout`, and a fake clock would freeze that sleep
+    // instead of letting the worktree finish preparing.
+    await composed.service.syncNow()
+    const first = composed.service.status()
+    expect(first.lastError).toBeUndefined()
+    expect(completed).toHaveLength(1)
+    expect(first.running).toBe(false)
+
+    // Only the cadence assertion needs a fake clock: the live write re-arms the
+    // interval, so the next tick must launch a cycle.
     vi.useFakeTimers()
     try {
-      const composed = await composeSessionSync({
-        startupSyncDelayMs: 60_000,
-        persistence: fakePersistence(),
-        config: {
-          enabled: true,
-          remote,
-          branch: 'main',
-          intervalMinutes: 5,
-          mappings: [{ key: 'demo', path: project }],
-        },
-      })
-      const completed: unknown[] = []
-      composed.ctx.on('session-sync/completed', (payload) => { completed.push(payload) })
-      // One awaited cycle first: it prepares the worktree, so the assertion
-      // below observes the timer-launched cycle and not its git setup.
-      await composed.service.syncNow()
-      expect(completed).toHaveLength(1)
-
       await composed.write({ intervalMinutes: 1 })
       expect(composed.service.getSettings().intervalMinutes).toBe(1)
-
-      // The live change re-arms the cadence: the next interval tick launches.
       await vi.advanceTimersByTimeAsync(60_000)
       expect(composed.service.status().running).toBe(true)
-      await composed.service.syncNow()
-      expect(completed).toHaveLength(2)
     } finally {
       vi.useRealTimers()
     }
-  })
+    // Back on the real clock the launched cycle settles.
+    await composed.service.syncNow()
+    expect(completed).toHaveLength(2)
+  }, 60_000)
 })

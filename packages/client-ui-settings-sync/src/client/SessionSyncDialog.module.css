@@ -1,0 +1,85 @@
+/* Sync-records dialog body, in the same settings-panel vocabulary as the
+ * section: 12/18 caption text, `border-l2` hairlines, and `--dsw-alias-*`
+ * tokens only (bare `--border`/`--text-*` names would stay light in dark
+ * mode). The Modal supplies the card, mask, header, and footer. */
+
+/* The records list is the one growing region: the card caps its own height,
+ * so this scrolls instead of the dialog growing past the viewport. */
+.content {
+  max-height: min(360px, 60vh);
+  overflow-y: auto;
+}
+
+.hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.error {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-state-error-primary);
+  word-break: break-all;
+}
+
+.errorBlock {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.records {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.record {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-base);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.recordHost {
+  color: var(--dsw-alias-label-primary);
+  font-weight: 500;
+  word-break: break-all;
+}
+
+.recordTime {
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
+}
+
+.recordDirection {
+  color: var(--dsw-alias-label-secondary);
+  white-space: nowrap;
+}
+
+.recordEvents {
+  color: var(--dsw-alias-label-secondary);
+  white-space: nowrap;
+}
+
+.recordConflict {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  border-radius: 6px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-state-error-primary);
+  white-space: nowrap;
+}

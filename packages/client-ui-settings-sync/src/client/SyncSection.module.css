@@ -90,45 +90,156 @@
   font-size: 14px;
 }
 
-.mappingRow {
+.formActions {
   display: flex;
-  align-items: flex-end;
+  justify-content: flex-start;
+}
+
+/* Selection tree: read-only, grouped workspace → session. The group header
+ * carries the match warning, each row its provenance, last sync, and badges. */
+.tree {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.workspaceGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+}
+
+.workspaceHead {
+  display: flex;
+  align-items: center;
   gap: 8px;
 }
 
-.mappingRow .field {
-  flex: 1;
+.workspaceName {
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+  word-break: break-all;
+}
+
+.sessionList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sessionRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-base);
+}
+
+.sessionMain {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   min-width: 0;
 }
 
-.removeButton {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  flex-shrink: 0;
-  border: none;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--dsw-alias-label-secondary);
-  cursor: pointer;
+.sessionTitle {
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--dsw-alias-label-primary);
+  word-break: break-all;
 }
 
-.removeButton:hover:not(:disabled) {
+.sessionMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.sessionMetaItem {
+  white-space: nowrap;
+}
+
+.sessionBadges {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.badgeWarning,
+.badgeConflict,
+.badgeMuted {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.badgeWarning {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-state-warning-primary);
+}
+
+.badgeConflict {
   background: var(--dsw-alias-interactive-bg-hover);
   color: var(--dsw-alias-state-error-primary);
 }
 
-.removeButton:disabled {
-  opacity: 0.4;
-  cursor: default;
+.badgeMuted {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-tertiary);
 }
 
-.mappingActions {
+.pendingBlock {
   display: flex;
-  justify-content: flex-start;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pendingList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pendingRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-base);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.pendingName {
+  color: var(--dsw-alias-label-primary);
+  word-break: break-all;
+}
+
+.pendingCount {
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
 }
 
 .statusBlock {

@@ -4,7 +4,8 @@
  * Vendored (trimmed) from the DeepSeek Harness snapshot-store engine
  * (`packages/client/store`, MIT, (c) DeepSeek): zustand vanilla + immer
  * produce + subscribeWithSelector, reduced to the bare observable the
- * settings page needs — `createSnapshotStore` plus the `SnapshotStore` type.
+ * settings page needs — `createSnapshotStore`, `deriveSnapshot`, plus the
+ * `SnapshotStore` type.
  * The published `@deepseek-ai/dsh-client-store` ships this surface only as
  * a browser bundle, so a third-party plugin that wants node-side tests
  * vendors the small engine instead of depending on the harness module
@@ -44,6 +45,36 @@ export interface SnapshotStore<T> extends ObservableSnapshot<T> {
  */
 export function shallowEqual(a: unknown, b: unknown): boolean {
   return shallow(a, b)
+}
+
+/**
+ * Project one observable into another, recomputing only when the source
+ * snapshot changes identity. Vendored from the harness row actions' `derive`
+ * helper for the same reason: a consumer hook binds this projection with
+ * `useSyncExternalStore`, which requires `getSnapshot()` to return the same
+ * value until something actually changed — a projection rebuilt per read
+ * would re-render forever.
+ * @param source - the observable to project.
+ * @param project - pure projection of one source snapshot.
+ * @returns the projected observable, subscribing through the source.
+ */
+export function deriveSnapshot<S, T>(
+  source: ObservableSnapshot<S>,
+  project: (snapshot: S) => T,
+): ObservableSnapshot<T> {
+  let seen: S | undefined
+  let value: T | undefined
+  return {
+    getSnapshot: () => {
+      const snapshot = source.getSnapshot()
+      if (value === undefined || snapshot !== seen) {
+        seen = snapshot
+        value = project(snapshot)
+      }
+      return value
+    },
+    subscribe: listener => source.subscribe(listener),
+  }
 }
 
 /** Batches subscriber notification into one flush per animation frame. */

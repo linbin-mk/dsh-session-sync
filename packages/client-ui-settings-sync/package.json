@@ -1,7 +1,7 @@
 {
   "name": "@linbin-mk/dsh-client-ui-settings-sync",
-  "description": "Session sync settings plugin for the dsh web GUI: the Sync section page with git remote, cadence, project mappings, and manual sync, talking to the host through the plugin's own same-origin HTTP API",
-  "version": "0.4.0",
+  "description": "Session sync UI plugin for the dsh web GUI: the Sync settings page (git remote, cadence, cleanup, and the read-only synced-session tree), the session row's sync toggle, and the sync-records dialog, all talking to the host through the plugin's own same-origin HTTP API",
+  "version": "0.5.0",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
@@ -99,7 +99,7 @@
     "@deepseek-ai/dsh-client-ui-slots": "^0.1.7-rc.2",
     "@deepseek-ai/dsh-client-ui-workspace": "^0.1.7-rc.2",
     "@deepseek-ai/dsh-invariants": "^0.1.7-rc.2",
-    "@linbin-mk/dsh-session-sync": "^0.4.0",
+    "@linbin-mk/dsh-session-sync": "^0.5.0",
     "react": "^18.2.0"
   },
   "peerDependenciesMeta": {

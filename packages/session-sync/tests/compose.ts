@@ -46,15 +46,30 @@ export interface ComposeRow {
   config?: Record<string, unknown>
 }
 
+/** One local workspace a fake registry serves. */
+export interface FakeWorkspaceSpec {
+  /** Stable local workspace id; defaults to `workspace-<n>`. */
+  id?: string
+  /** Display title — what a repo manifest name is matched against. */
+  title: string
+  /** Canonical directory path sessions of this workspace live under. */
+  path: string
+}
+
+/** One workspace entity the fake registry hands back. */
+export interface FakeWorkspaceEntity {
+  readonly id: string
+  readonly title: string
+  readonly path: string
+  attachSession(id: unknown): Promise<void>
+}
+
 /** The structural slice of `workspaceRegistry` this plugin consumes. */
 export interface FakeWorkspaceRegistry {
-  resolveByPath(path: string): Promise<{ attachSession(id: unknown): Promise<void> } | undefined>
-  create(path: string, title?: string): Promise<{ attachSession(id: unknown): Promise<void> }>
+  list(): FakeWorkspaceEntity[]
+  resolveByPath(path: string): Promise<FakeWorkspaceEntity | undefined>
   readonly archivedSessionIds: readonly unknown[]
   archiveSession(id: unknown): Promise<void>
-  readonly pinnedSessionIds: readonly unknown[]
-  pinSession(id: unknown): Promise<void>
-  unpinSession(id: unknown): Promise<void>
 }
 
 /** Options of {@link composeSessionSync}. */
@@ -71,7 +86,7 @@ export interface ComposeOptions {
   persistence?: unknown
   /** Value provided as `sessionProjectionCache`, when the spec wants the warm-up path. */
   projectionCache?: { coldSnapshot(meta: unknown, inheritedEventCount: unknown, events: unknown): unknown }
-  /** Value provided as `workspaceRegistry`, when the spec wants pin selection and attach. */
+  /** Value provided as `workspaceRegistry`, when the spec wants name matching and attach. */
   workspaces?: FakeWorkspaceRegistry
   /** Value provided as `webServer`, when the spec wants the plugin's HTTP routes mounted. */
   webServer?: SessionSyncWebServer
@@ -80,38 +95,42 @@ export interface ComposeOptions {
 }
 
 /**
- * An in-memory workspace registry: attach accounting, a grow-only archive set,
- * and the pin set that selects what synchronizes. A spec seeds `pinnedIds` with
- * the sessions it expects to sync, exactly as a user's pin action would.
- * @param pinnedIds - session ids the machine starts with pinned.
+ * An in-memory workspace registry: the local matching table (title → path)
+ * plus attach accounting and a grow-only archive set. The plugin matches a
+ * repo workspace's manifest name against these titles, so a spec lists exactly
+ * the workspaces the machine should offer for placement.
+ * @param workspaces - local workspaces the machine serves, in registry order.
+ * @param archivedIds - session ids the machine already archived.
  * @returns the registry double.
  */
-export function fakeWorkspaceRegistry(pinnedIds: readonly string[] = []): FakeWorkspaceRegistry & {
+export function fakeWorkspaceRegistry(
+  workspaces: readonly FakeWorkspaceSpec[] = [],
+  archivedIds: readonly string[] = [],
+): FakeWorkspaceRegistry & {
   readonly attached: Map<string, string[]>
   readonly archivedIds: unknown[]
-  readonly pinnedIds: unknown[]
 } {
-  const pinned: unknown[] = [...pinnedIds]
-  const archived: unknown[] = []
   const attached = new Map<string, string[]>()
-  const entity = (path: string) => ({
-    attachSession: async (id: unknown) => { attached.set(path, [...attached.get(path) ?? [], String(id)]) },
+  const archived: unknown[] = [...archivedIds]
+  const entities: FakeWorkspaceEntity[] = workspaces.map((workspace, index) => {
+    attached.set(workspace.path, [])
+    return {
+      id: workspace.id ?? `workspace-${index + 1}`,
+      title: workspace.title,
+      path: workspace.path,
+      attachSession: async (id: unknown) => {
+        attached.set(workspace.path, [...attached.get(workspace.path) ?? [], String(id)])
+      },
+    }
   })
   return {
     attached,
     archivedIds: archived,
-    pinnedIds: pinned,
-    resolveByPath: async (path: string) => (attached.has(path) ? entity(path) : undefined),
-    create: async (path: string) => { attached.set(path, []); return entity(path) },
+    list: () => entities,
+    resolveByPath: async (path: string) => entities.find(entity => entity.path === path),
     archivedSessionIds: archived,
-    archiveSession: async (id: unknown) => { archived.push(id) },
-    pinnedSessionIds: pinned,
-    pinSession: async (id: unknown) => {
-      if (!pinned.some(candidate => String(candidate) === String(id))) pinned.unshift(id)
-    },
-    unpinSession: async (id: unknown) => {
-      const at = pinned.findIndex(candidate => String(candidate) === String(id))
-      if (at !== -1) pinned.splice(at, 1)
+    archiveSession: async (id: unknown) => {
+      if (!archived.some(candidate => String(candidate) === String(id))) archived.push(id)
     },
   }
 }

@@ -7,7 +7,7 @@
 [![许可证](https://img.shields.io/npm/l/@linbin-mk/dsh-session-sync)](LICENSE)
 [![Node](https://img.shields.io/node/v/@linbin-mk/dsh-session-sync)](package.json)
 
-面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）的第三方会话同步插件：通过一个 git 仓库，在多台电脑之间同步**你置顶的**会话，并自带 Web 设置页。
+面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）的第三方会话同步插件：通过一个 git 仓库，在多台电脑之间同步**你亲手挑的**会话，并自带 Web 界面。
 
 ```
 ┌───────────── 电脑 A ─────────────┐      ┌───────────── 电脑 B ─────────────┐
@@ -17,20 +17,22 @@
 └─────────────────────────────────┘      └─────────────────────────────────┘
 ```
 
-- **会话跟着你走，机器路径不跟。** 已映射项目的逻辑事件日志导出为 `projects/<key>/<id>.jsonl`；插件自有的版本化文件头记录可移植项目 key 与 fork 继承事件数，不复制 harness JSONL 后端的私有文件、压缩或行编码。导入时项目 key 解析成本机映射路径。
-- **置顶即同步，是唯一的选择器。** 同步范围 = 映射项目 ∩ 置顶会话：在侧栏把任意会话点成置顶，它就开始跨机同步（日志推送到 `projects/<key>/<id>.jsonl`）；取消置顶，它的仓库产物就在下一个周期被删除、停止同步。**本机会话在任何情况下都不会被删除**——取消置顶只让它退出同步，本地这份完整保留。
-- **置顶集合跟着走。** 每台机器把仓库根部的 `pinned.json`（跨机唯一真相，整份快照，不是并集）镜像进自己的置顶集合，因此一台机器上的置顶在所有机器上都会显示为置顶；取消置顶同理传播。为了不让"谁改了什么"互相打架，每台机器在 harness home 下记一份基线（`pins.json`）：自己的置顶变了就发布，没变就采纳仓库的。
-- **映射是双向白名单，置顶是内层门禁。** 只有映射过的项目会被上传；未映射项目的会话永远不会落入 DSH。映射项目里没被置顶的会话同样不上传、也不被导入。
-- **首次运行只采纳、不删除。** 一台还没跑过周期的机器（没有基线）不会把仓库里的选择当成「要取消置顶」，因此不会误删仓库产物。同一条保护也覆盖之后任何无法镜像选择的周期——没有 `workspaceRegistry` 的部署，或被 host 拒绝的置顶：基线只记录真正落到本机的置顶，且只在推送成功之后记录，所以本机从未持有过的置顶不会被读成「你取消了置顶」，远端没接受的发布也会重试而不是被当成删除。
-- **冲突策略：前缀合并 + 双副本。** 会话日志是只追加的事件流：一份日志是另一份的严格前缀时，更长者胜出；真正分叉时，远端尾巴原样保留在 `conflicts/<key>/<id>-<host>.jsonl` 并上报——数据绝不静默丢失。分叉时的导出永远不会覆盖仓库工件：仓库保留自己已有的一份稳定日志（互相覆盖会让它每个周期被毁掉），分叉的本地尾巴只进入冲突副本。
-- **未闭合 turn 不出网。** 没有以 `turn/end` 收尾的日志，要么正在所属电脑上实时运行，要么是崩溃后等待 harness 的「中断修复」。把它导出等于发布一个截断快照：导入方加载后会被 harness 补上合成的 `step/end` + `turn/end {interrupted}` 修复尾巴，从此与本机的真实后续内容永久分叉。因此导出跳过未闭合 turn 的日志（闭合后下一周期自然推送），导入也跳过未闭合 turn 的工件（旧版本插件留下的过期快照，所属电脑会用闭合日志替换它）。
-- **归档标记跟着走，归档内容退出 git。** 归档与置顶在 harness 里互斥，所以归档一个置顶会话同时也是取消它的同步：它会从 `pinned.json` 里移除，仓库产物删除。 在一台电脑上归档的会话，通过 `projects/<key>/archived.json` 里的标记在每台电脑的会话列表中都隐藏，同时它位于 git 仓库里的 `projects/<key>/<id>.jsonl` 会在下一次同步时被删除——归档会话不再占用 git 空间。本机会话数据不受影响，只有只增标记继续传播，因此仓库里的标记只是简单并集，永远不会产生冲突。
+- **点一下才开始同步。** 在侧栏会话行的 `...` 菜单里选「同步会话」，这个会话就加入**跨机共享的同步集合**；再次打开菜单会看到「会话同步中」，点它弹出同步日志（哪台机器、什么时候、推还是拉、多少条事件），弹窗里可以直接「关闭同步」。不需要先置顶，也不再有「项目映射」这类配置。
+- **会话跟着你走，机器路径不跟。** 每个会话导出为 `workspaces/<key>/session-<id>.jsonl`；首行是插件自有的版本化文件头，记录工作区的稳定 key 而不是本机路径。导入时按工作区**名称**解析成本机路径，插件不复制 harness JSONL 后端的私有文件、压缩或行编码。
+- **集合是全局一份真相。** 仓库根部的 `sync.json` 是整份快照（不是并集），每台机器把它镜像进自己的选择；谁在哪台机器上关闭同步，都会传播到所有机器。为了不让「谁改了什么」互相打架，每台机器在 harness home 下记一份锚点（`state.json`）：自己的选择变了就发布，没变就采纳仓库的。
+- **首次运行只采纳、不删除。** 一台还没跑过周期的机器（没有锚点）不会把仓库里的选择当成「要关闭同步」，因此不会误删仓库产物。同一条保护也覆盖之后任何无法发布的周期：锚点只记录真正应用的选择，且只在推送成功之后记录，所以本机从未持有过的选择不会被读成「你关闭了它」，远端没接受的发布也会重试而不是被当成删除。
+- **按名字落到工作区。** 每个 `workspaces/<key>/manifest.json` 记录该工作区的**显示名称**：另一台电脑上标题完全相同的那个工作区就是目的地。只有**恰好命中一个**才自动导入；一个都没命中（包括任一方改过名——改名不适配）、或者本机有多个同名工作区（harness 允许不同路径共用标题）时，这些会话留在**待匹配**里等你在本机建出同名工作区，下一个周期自动落位。**没有绑定 UI，也不写任何本地映射。**
+- **不落地就不导入。** harness 里一个会话只能挂到「路径等于该会话 header 里 cwd」的工作区，而且 cwd 一旦创建就不可改、也没有跨工作区改挂的接口。所以插件在导入**之前**就完成匹配并把 cwd 写成本机工作区路径；匹配不上就原样留在仓库里等，绝不猜一个位置先塞进去。
+- **冲突策略：前缀合并 + 双副本。** 会话日志是只追加的事件流：一份日志是另一份的严格前缀时，更长者胜出；真正分叉时，远端尾巴原样保留在 `conflicts/<key>/<session-id>-<host>.jsonl` 并上报——数据绝不静默丢失。分叉时的导出永远不会覆盖仓库工件。
+- **未闭合 turn 不出网。** 没有以 `turn/end` 收尾的日志，要么正在所属电脑上实时运行，要么是崩溃后等待 harness 的「中断修复」。把它导出等于发布一个截断快照：导入方加载后会被 harness 补上合成的修复尾巴，从此与本机的真实后续内容永久分叉。因此导出跳过未闭合 turn 的日志，导入也跳过未闭合 turn 的工件。
+- **本机会话在任何情况下都不会被删除。** 关闭同步、归档、清理，都只影响仓库里的产物和共享标记，本机那份完整保留。
+- **归档标记跟着走，归档内容退出 git。** 在一台电脑上归档的会话，通过 `workspaces/<key>/archived.json` 里的标记在每台电脑的会话列表中都隐藏，同时它在仓库里的 `session-<id>.jsonl` 会在下一次同步时被删除——归档会话不再占用 git 空间。仓库里的标记是只增并集，永远不会产生冲突。
 - **导入即预热投影缓存。** 同步导入直接写持久化、绕过 live 会话存储，harness 的投影缓存不会自动折叠它；插件在每次导入后对会话做一次冷读预热（fail-soft），标题、子代理分组等列表行元数据立即可见，无需先点开会话。
-- **切换电脑后的首次续聊注入一次提醒。** 每当导入给某个会话带来来自其他电脑的新事件，插件就为它武装一个一次性标记（持久化在 harness home 下，重启不丢）。该会话的用户首次发消息时——经 harness 的 `agent/pre-step` 缝检测，与 AGENTS.md 加载器同一条注入路径——一条插件 `notice` 消息会紧跟在用户消息之后折入上下文，告知大模型：本会话历史是从另一台电脑同步而来的，历史路径可能与当前电脑不符，此后一律以当前工作目录为准。标记注入即消耗：同一台电脑继续聊天不会重复注入；提醒本身是持久事件、随日志一起同步，下次再换机器时那边首次续聊会注入自己的提醒。子代理会话除外。
-- **仓库只是传输介质。** 每个周期执行 fetch → 硬重置 → 导入 → 导出 → 提交 → 推送，git 合并冲突无从产生。远程命令（`ls-remote`、`fetch`、`push`）自带指数退避重试（默认最多 3 次尝试），一次瞬时的 SSH 连接损坏（如 `Bad packet length`）不再让整个周期报废；分支探测每个周期只做一次，`resetHard` 复用 fetch 的结果而不是再次探测远端。
-- **定期清理 git 空间。** git 不会遗忘已删除的文件：归档删除只影响 HEAD，历史里的每个旧版本永远留在对象库里。清理功能按周期（小时）把共享历史重写到只保留最近 N 次提交（默认 200）并强推（`--force-with-lease`），被截断的提交连同它们的 blob 一起退出仓库；重放保留提交时最新树原样保留——当前所有文件一个不少，其他电脑在下一个周期自动按重写后的历史重新同步。清理在每个同步周期之后检查一次到期（同步节奏即检查粒度），设置页还有「立即清理」按钮。远端托管服务自身的对象库回收（服务端的 GC）不在客户端控制范围内。
-- **同步日志保留 3 天。** 每个周期在 harness home 的 `session-sync/logs/sync-YYYY-MM-DD.jsonl` 里追加开始/成功/失败记录（含计数、冲突副本、错误与耗时），读取和写入时自动清理超出 3 天窗口的日志文件；设置页的折叠面板展示最近记录，状态行里的失败信息带上自己的发生时间，与上次成功的统计区分开。
-- **自带 Web 界面。** 设置页（总开关、SSH 仓库地址、分支、同步间隔、git 空间清理、项目映射、立即同步/立即清理）+ 侧栏同步状态点。设置页是**草稿 + 显式保存**：改完点「保存」才写入，「撤销修改」丢弃改动，校验（必填、分支非空、项目 key/路径不重复）就地提示；「添加项目」新增的是空行，选好本地工作区再保存，不会像以前那样一加就撞重复路径。
+- **切换电脑后的首次续聊注入一次提醒。** 每当导入给某个会话带来来自其他电脑的新事件，插件就为它武装一个一次性标记（持久化在 harness home 下，重启不丢）。该会话的用户首次发消息时——经 harness 的 `agent/pre-step` 缝检测——一条插件 `notice` 消息会紧跟在用户消息之后折入上下文，告知大模型：本会话历史是从另一台电脑同步而来的，历史路径可能与当前电脑不符，此后一律以当前工作目录为准。标记注入即消耗。子代理会话除外。
+- **仓库只是传输介质。** 每个周期执行 fetch → 硬重置 → 导入 → 导出 → 提交 → 推送，git 合并冲突无从产生。远程命令（`ls-remote`、`fetch`、`push`）自带指数退避重试（默认最多 3 次尝试），一次瞬时的 SSH 连接损坏不再让整个周期报废。
+- **定期清理 git 空间。** git 不会遗忘已删除的文件：归档删除只影响 HEAD，历史里的每个旧版本永远留在对象库里。清理功能按周期（小时）把共享历史重写到只保留最近 N 次提交（默认 200）并强推（`--force-with-lease`），被截断的提交连同它们的 blob 一起退出仓库；重放保留提交时最新树原样保留——当前所有文件一个不少，其他电脑在下一个周期自动按重写后的历史重新同步。
+- **同步日志保留 3 天。** 每个周期在 harness home 的 `session-sync/logs/sync-YYYY-MM-DD.jsonl` 里追加开始/成功/失败记录（含计数、冲突副本、错误与耗时），读写时自动清理超出 3 天窗口的日志文件；设置页的折叠面板展示最近记录。另外，**每个会话**有一份自己的同步记录（`workspaces/<key>/session-<id>.records.json`，保留最近 20 条），那是行菜单弹窗里显示的「机器 + 时间」来源，会随仓库传播，所以你能看到另一台机器什么时候拉过它。
+- **自带 Web 界面。** 设置页（总开关、SSH 仓库地址、分支、同步间隔、git 空间清理、同步会话集合树、待匹配工作区、立即同步/立即清理）+ 侧栏同步状态点 + 会话行菜单项 + 同步日志弹窗。设置页的配置区仍是**草稿 + 显式保存**：改完点「保存」才写入，「撤销修改」丢弃改动，校验（必填、分支非空）就地提示。
 
 ## 为什么这个插件不需要改 harness 核心代码
 
@@ -39,13 +41,26 @@ harness 的 RPC 表（`apiproxy`）是编译器锁死的静态注册表——第
 | 路由 | 方法 | 用途 |
 |---|---|---|
 | `/session-sync/status` | GET | 只读同步状态视图 |
-| `/session-sync/sync-now` | POST | 立即执行一个同步周期并返回最新状态 |
-| `/session-sync/cleanup-now` | POST | 立即执行一次 git 空间清理并返回最新状态 |
+| `/session-sync/selection` | GET | 同步集合树（工作区 → 会话）+ 待匹配 |
+| `/session-sync/sessions/<id>` | POST | 把会话加入同步集合 |
+| `/session-sync/sessions/<id>` | DELETE | 关闭该会话的同步 |
+| `/session-sync/sessions/<id>/records` | GET | 该会话的同步记录（机器 + 时间，新的在前） |
+| `/session-sync/sync-now` | POST | 执行一个同步周期并返回最新状态 |
+| `/session-sync/cleanup-now` | POST | 执行一次 git 空间清理并返回最新状态 |
 | `/session-sync/settings` | GET | 设置视图（`writable` + 配置段） |
 | `/session-sync/settings` | POST | 合并一个 patch 到设置段（host 校验） |
 | `/session-sync/logs` | GET | 最近同步日志（保留窗口内，新的在前，`?limit=` 上限 500） |
 
-浏览器端用普通 `fetch` 调用状态、手动操作与日志路由。写路由拒绝跨源请求（`Origin` 头必须指向本服务器自身 host）和畸形请求体。设置段的读写走 harness 通用的 config form（`ctx.configForms`，入口 id 就是 profile 里的 `session-sync` 行），由 harness 自己做修订号围栏与推送；插件自己的设置路由仍保留两个用途：`GET` 供 Host 把偏好保留在浏览器进程内的页面（非 loopback 页面，`mode: 'memory'`）只读展示配置，`POST` 是唯一带回 host 拒绝原因（如跨字段校验消息）的写入路径，页面在 config form 报 `false` 时用它取回原因。UI 唯一还在用 harness 通用接口的其余数据是工作区列表（`workspace.list`）——那是标准且未改动的面。
+浏览器端用普通 `fetch` 调用这些路由。写路由拒绝跨源请求（`Origin` 头必须指向本服务器自身 host）和畸形请求体。设置段的读写走 harness 通用的 config form（`ctx.configForms`，入口 id 就是 profile 里的 `session-sync` 行），插件自己的设置路由仍保留两个用途：`GET` 供 Host 把偏好保留在浏览器进程内的页面（非 loopback 页面，`mode: 'memory'`）只读展示配置，`POST` 是唯一带回 host 拒绝原因的写入路径。
+
+界面本身也全部走 harness 开放的插槽，没有一处需要改核心：
+
+| 槽 | id | 内容 |
+|---|---|---|
+| `settings.section` | `sync` | 同步设置页 |
+| `sidebar.footer.action` | `session-sync-status` | 侧栏状态点 |
+| `sidebar.workspaces.session.menu.item` | `session-sync.toggle` | 会话行 `...` 菜单项（order 500） |
+| `shell.overlay` | `session-sync.dialog` | 同步日志弹窗 |
 
 ## 仓库结构
 
@@ -54,16 +69,31 @@ packages/session-sync/             @linbin-mk/dsh-session-sync（host 插件）
 packages/client-ui-settings-sync/  @linbin-mk/dsh-client-ui-settings-sync（浏览器插件）
 ```
 
-host 包包含同步引擎（`engine.ts`、`format.ts`、`git.ts`、`settings.ts`）、服务（`index.ts`）与 HTTP 层（`api.ts`、`routes.ts`）。浏览器包含设置页、状态页脚、页面控制器与 fetch 客户端。
+host 包包含同步引擎（`engine.ts`、`format.ts`、`git.ts`、`settings.ts`）、选择树投影（`selection.ts`）、服务（`index.ts`）与 HTTP 层（`api.ts`、`routes.ts`）。浏览器包含设置页、集合树、会话行菜单项、同步日志弹窗、状态页脚、页面控制器与 fetch 客户端。
 
-仓库格式（会话产物之外）：
+仓库格式（v2）：
 
 ```text
-pinned.json                  { "version": 1, "updatedAt", "host", "sessionIds": [...] }
-projects/<key>/archived.json { "version": 1, "sessionIds": [...] }
+sync.json                                    跨机同步集合（整份快照）
+workspaces/<key>/manifest.json               { version, key, name, updatedAt }   ← name 是匹配用的真相
+workspaces/<key>/session-<id>.jsonl          会话工件
+workspaces/<key>/session-<id>.records.json   该会话的同步记录（机器 + 时间，最近 20 条）
+workspaces/<key>/archived.json               归档标记（只增并集）
+conflicts/<key>/<session-id>-<host>.jsonl    冲突副本
 ```
 
-`pinned.json` 是跨机同步选择：只有它选中的会话会写出产物，也是每台机器镜像进本机置顶集合的那份列表。它是**整份快照**而不是并集——取消置顶必须能传播，并集永远表达不了「移除」。
+`sync.json` 的每条记录带 `id`、`key`、`workspaceName`、`title`、`addedAt`、`addedBy`。带 `title` 不是冗余：工件头里没有标题（只有 id、createdAt、parentSession、isSeeded、origin、delegationDepth、agentPreset），而集合里包含本机还没导入的会话——不写进来，设置页就画不出完整清单。
+
+本机状态（harness home 下的 `session-sync/`）：
+
+```text
+selection.json   { sessionIds }        本机当前的同步集合
+state.json       { firstSeen, syncedIds, ownedIds, workspaceKeys }   编辑检测锚点 + 工作区→key 记忆
+repo/            git 工作树
+logs/            周期日志
+```
+
+`workspaceKeys` 是工作区 id → 仓库目录 key 的记忆表：key 一旦分配就不再变化，所以**改名只会重写 manifest 里的 name，不会搬动任何产物**。
 
 ## 环境要求
 
@@ -73,18 +103,12 @@ projects/<key>/archived.json { "version": 1, "sessionIds": [...] }
 - PATH 中有 `git`，且同步远端需要 SSH key（host key 策略：`StrictHostKeyChecking=accept-new`）
 - 只有从源码构建时才需要 pnpm
 
-### 0.4.0：跟进 DeepSeek Harness 0.1.7-rc.2
+### 0.5.0 破坏性变更：从「置顶即同步」到「逐会话显式同步」
 
-- 所有 `@deepseek-ai/*` peer 范围从 `0.1.7-alpha.1` 升到 `0.1.7-rc.2`，并同步 harness vendor 的 Cordis 线（`@deepseek-ai/cordis ^4.0.4`、`@deepseek-ai/schemastery ^3.18.4`、`cordis-plugin-loader ^1.0.5`、`cordis-plugin-include ^1.0.9`）。仍停留在 `0.1.7-alpha.1` 的 profile 无法安装本版本。
-- 会话工件格式未变（harness 的 Session 格式仍是 v4），0.3.x 写出的仓库继续可用。
-- 归档标记仍是只增并集，尽管 `0.1.7-rc.2` 新增了取消归档路径——见[已知限制](#已知限制)。
-
-### 0.3.0 破坏性变更：全量同步 → 只同步置顶会话
-
-- 同步选择从「映射项目里的全部会话」收敛为「映射项目 ∩ 置顶会话」。升级后**请先在常用电脑上把要保留的会话逐个置顶**；第一个周期会把仓库里非置顶的会话产物一次性清掉（本机会话不受影响，仓库历史里也还留着旧版本）。
-- 取消置顶只让会话退出同步并删除它在仓库里的产物，**不会删除任何机器上的本地会话**。
-- 仓库根的 `pinned.json` 是新增的、跨机共享的选择文件；本机基线 `pins.json` 只为判断「是你改了置顶，还是别人改了仓库」，可以安全删除（代价是下一周期改成采纳仓库）。
-- 不提供「全量同步」回退开关：此版本只有置顶一种模式。
+- **同步选择换了主人。** v0.4 的选择 = 映射项目 ∩ 置顶会话，靠 harness 的置顶集合承载；v0.5 是插件自己的显式集合，入口在会话行 `...` 菜单。插件不再读写任何置顶状态。
+- **项目映射整个删除。** 跨机落位改为按**工作区名称**匹配 `manifest.json` 的 `name`。
+- **仓库格式升级到 v2，且不兼容 v0.4 写出的仓库。** `pinned.json` 与 `projects/` 目录不再被读取，工件头版本从 1 升到 2。**请用一个新仓库**（或清空旧仓库内容）后重新逐个添加要同步的会话；升级本身不做迁移，也不会删除任何本机会话。
+- 需要 DeepSeek Harness `0.1.7-rc.2`；仍停留在 `0.1.7-alpha.1` 的 profile 无法安装本版本。
 
 ## 安装
 
@@ -107,8 +131,8 @@ pnpm --dir packages/session-sync pack
 pnpm --dir packages/client-ui-settings-sync pack
 
 dsh plugin --profile web-sync add \
-  ./linbin-mk-dsh-session-sync-0.1.3.tgz \
-  ./linbin-mk-dsh-client-ui-settings-sync-0.1.3.tgz
+  ./linbin-mk-dsh-session-sync-0.5.0.tgz \
+  ./linbin-mk-dsh-client-ui-settings-sync-0.5.0.tgz
 ```
 
 从同一个 profile 移除：
@@ -132,30 +156,33 @@ dsh plugin --profile web-sync remove \
   name: '@linbin-mk/dsh-client-ui-settings-sync'
 ```
 
-安装会自动加入上面的两行。host 插件要求 `settings` 与 `sessionPersistence` 服务；存在 `workspaceRegistry` 时，置顶集合就是同步选择（导入的会话会挂到工作区、按仓库的 `pinned.json` 置顶，并把仓库里的归档标记应用到本机的归档集合）；存在 `sessionProjectionCache`（可选注入）时，导入完成即预热投影缓存，让列表行立刻带出标题等投影值。浏览器插件注册 `settings.section`（`sync`）设置页与 `sidebar.footer.action`（`session-sync-status`）状态点。
+安装会自动加入上面的两行。host 插件要求 `settings` 与 `sessionPersistence` 服务；`workspaceRegistry` 现在是**必需的能力**（没有它就无法按名匹配或导出任何会话，插件会跳过导出并报告），存在 `sessionProjectionCache`（可选注入）时导入完成即预热投影缓存，同时设置页用它零 I/O 地读出会话标题。
 
 ## 配置项
 
-配置就是 profile 里 `session-sync` 这一行的 Cordis Config：所有用户可改字段都是「活引用」（`.volatile()`），harness 把每次设置写入提交进这些引用并持久化到 profile patch 文档（旧版 `settings.yaml` 里的 `session-sync` 段会被 harness 自动导入）。字段表：
+配置就是 profile 里 `session-sync` 这一行的 Cordis Config：所有用户可改字段都是「活引用」（`.volatile()`），harness 把每次设置写入提交进这些引用并持久化到 profile patch 文档。字段表：
 
 | 字段 | 含义 |
 |---|---|
-| `startupSyncDelayMs` | 启动后到首次自动周期的延迟（毫秒，默认 3000）。部署项：它不在设置页里，只有用户可改字段才是活引用。 |
-| `enabled` | 总开关；开启时 `remote` 必填。 |
+| `startupSyncDelayMs` | 启动后到首次自动周期的延迟（毫秒，默认 3000）。部署项：它不在设置页里。 |
+| `enabled` | 总开关；开启时 `remote` 必填。关闭时会话行菜单项不显示。 |
 | `remote` | Git 远端地址（SSH）。凭据来自 `~/.ssh`。 |
 | `branch` | 同步分支；默认 `main`。 |
 | `intervalMinutes` | 自动同步间隔（分钟，最小 1，默认 5）。 |
-| `mappings` | `[{ key, path }]`：可移植项目 key 与本机目录。 |
 | `cleanup` | `{ enabled, periodHours, keepCommits }`：定期 git 空间清理开关、清理周期（小时，最小 1，默认 24）、保留的最近提交数量（最小 1，默认 200）。 |
 
-schema 管字段类型与取值范围，跨字段规则（开启必须有 `remote`、分支非空、映射 key/path 不重复或留空）由插件在每条写入路径上校验：设置页、profile patch 文档、以及 harness 导入旧 `settings.yaml` 时都先解析候选配置，不合规的写入不会落盘。
+**同步集合不是配置项**，它是数据：设置在设置页里只读展示，写入入口只有会话行菜单（以及设置页行尾的「关闭同步」）。
 
-节奏：启动 `startupSyncDelayMs` 后一个自动周期，之后每 `intervalMinutes` 一次，外加手动按钮；所有入口共用单飞守卫。因为 harness 没有「置顶动作」的事件缝，插件另有一个 30 秒的看门狗（`DEFAULT_WATCHDOG_INTERVAL_MS`）比较本机置顶集合与基线，发现你刚改了置顶就立刻跑一个周期——置顶→同步的延迟上限是 30 秒（看门狗）+ 对端一个周期；对端想更快可以把 `intervalMinutes` 调到 1。清理在每次成功周期之后检查一次到期，外加设置页的立即清理按钮；清理与同步共用同一个工作树，通过各自的单飞守卫串行化。
+节奏：启动 `startupSyncDelayMs` 后一个自动周期，之后每 `intervalMinutes` 一次。**用户点「同步会话」会立刻触发一个周期**（单飞守卫），所以本机是即时的，对端看到它取决于对端的 `intervalMinutes`。清理在每次成功周期之后检查一次到期，外加设置页的立即清理按钮。
+
+## 待匹配工作区
+
+导入前先按名匹配。落不进去的会话不会消失，它们留在仓库里，并在设置页的「待匹配工作区」区列出（含该工作区下等待的会话数）。让它们落位的唯一动作是：**在本机用侧栏「添加工作区」建一个标题完全相同的工作区**，下一个周期会自动匹配并导入。改了名的工作区不会自动适配——这是刻意的，猜错位置会让会话永久挂错工作区。
 
 ## 安全姿态
 
 - 插件不存储任何凭据：git 远端是你的 SSH 地址，key 在 `~/.ssh`。
-- 机器路径永不进入仓库（导出时改写为可移植 key）。
+- 机器路径永不进入仓库（导出时改写为工作区 key）。
 - 写路由强制同源校验；状态与设置读取无副作用。
 - 插件自己的 git 提交使用固定身份 `dsh-session-sync <dsh-session-sync@localhost>`。
 
@@ -163,10 +190,12 @@ schema 管字段类型与取值范围，跨字段规则（开启必须有 `remot
 
 ```sh
 pnpm install
-pnpm test        # 202 个测试：engine、format、git、log、settings、service、routes、组合、配置写入、UI
+pnpm test        # engine、format、selection、git、log、settings、service、routes、组合、配置写入、UI
 pnpm typecheck
 pnpm build       # 两个包的 tsc + 浏览器 bundle（lib/client.js）
 ```
+
+设计与实现契约见 [`docs/spec/session-sync-v2.md`](docs/spec/session-sync-v2.md)。
 
 ### 关于第三方测试环境
 
@@ -179,8 +208,8 @@ pnpm build       # 两个包的 tsc + 浏览器 bundle（lib/client.js）
 
 ## 常见问题
 
-- **刚发版后 `dsh plugin add` 报 404。** 全新版本在 registry 读路径上需要几分钟才可见，`dist-tags` 与 tarball 通常会先可用。稍后重试即可；不要重复发布——版本已存在，第二次必然冲突。
-- **通过镜像安装报 `ERR_PNPM_FETCH_404`。** npmmirror 等镜像同步新版本有自己的节奏。给命令加 `--registry=https://registry.npmjs.org`，或等镜像同步。
+- **刚发版后 `dsh plugin add` 报 404。** 全新版本在 registry 读路径上需要几分钟才可见。稍后重试即可；不要重复发布。
+- **通过镜像安装报 `ERR_PNPM_FETCH_404`。** 给命令加 `--registry=https://registry.npmjs.org`，或等镜像同步。
 - **pnpm 拒绝或询问刚发布的版本。** 这是 pnpm 的 `minimumReleaseAge` 延迟保护。放行该包或等过这个时间窗口。
 - **Web GUI 起不来、或设置页里没有「同步」。** 浏览器半侧靠 harness 的模块表索引，索引键是**包名**，不是短名。确认两行都在：
 
@@ -189,19 +218,23 @@ pnpm build       # 两个包的 tsc + 浏览器 bundle（lib/client.js）
   ```
 
   Host 半侧与同步引擎此时可能完全正常，所以 `--dump-config` 看着没问题**不能**证明浏览器半侧已加载——唯一可靠的判据是浏览器控制台无错误、且设置页出现「同步」。
-- **同步周期报 SSH 错误。** 插件用 `StrictHostKeyChecking=accept-new`，首次连接新主机仍需要你的 key 可用（先试 `ssh -T git@<host>`）。瞬时损坏（如 `Bad packet length`）由指数退避重试吸收；持续失败请看设置页的同步日志面板。
+- **会话行菜单里没有「同步会话」。** 三种情况：总开关没开或没填远端；该会话不属于任何工作区；本机不持有该会话。设置页的集合树能看到集合本身。
+- **另一台电脑上看不到某个会话。** 先看设置页的「待匹配工作区」：多半是那台机器没有同名工作区。在那里建一个同名工作区即可。
+- **同步周期报 SSH 错误。** 插件用 `StrictHostKeyChecking=accept-new`，首次连接新主机仍需要你的 key 可用（先试 `ssh -T git@<host>`）。瞬时损坏由指数退避重试吸收；持续失败请看设置页的同步日志面板。
 - **在一台电脑归档后，另一台仍能看到该会话。** 归档标记是只增并集，需要一次成功周期才会传播。确认两端都完成了至少一个周期。
-- **导入的会话列表行只显示项目名、没有标题。** 投影预热是 fail-soft 的：那次预热失败时该行退回项目名，点开会话或下次导入即刷新。
 
 ## 已知限制
 
-- 状态刷新为轮询（页脚每 60 秒 + 每次操作后）；harness 内的事件推送路径需要核心权限，故刻意不用。
+- 状态刷新为轮询（页脚每 60 秒 + 每次操作后 + 菜单打开时定向刷新）；harness 内的事件推送路径需要核心权限，故刻意不用。
 - 设置改动由 harness 推送到已打开的设置页（config form 订阅 + `settings/document-updated`），无需刷新。
 - 仅支持 SSH 远端；HTTPS + token 未实现。
-- 投影预热是 fail-soft 的：某次预热失败（如持久化读异常）时该行暂时退回项目名显示，点开会话或以后再次导入时会刷新。
-- 冲突副本需要手动处理；页面只显示数量。
-- 共享归档标记是只增并集：DeepSeek Harness `0.1.7-rc.2` 已加入取消归档路径，但本机恢复会在下一个周期被并回的仓库标记撤销——仓库标记就是共享状态。要让取消归档传播，需要在每个项目的 `archived.json` 里加入墓碑记录（并升格式版本），本版本未实现。无论哪种情况，归档内容都无法从仓库恢复：标记落地时会话文件即被删除。
-- 清理是历史重写：本地与远端的历史提交被丢弃（最新树保留）。远端托管服务自身的对象库 GC（决定服务端占用何时回落）不在客户端控制范围内；若多台电脑几乎同时清理，`--force-with-lease` 会让后到者的强推失败并在下一周期重试，不会静默覆盖别人的新提交。
+- **重命名工作区不适配。** 任一方改名，名称就对不上，那些会话进入待匹配；仓库侧的 key 不变，产物不会搬动。
+- **本机有多个同名工作区时不自动匹配。** 会留在待匹配里，需要你自行消除歧义（harness 允许不同路径共用同一显示标题）。
+- 投影预热是 fail-soft 的：某次预热失败时该行暂时退回工作区名显示，点开会话或以后再次导入时会刷新。
+- 冲突副本需要手动处理；页面只显示数量与最近一次记录。
+- 共享归档标记是只增并集：要让取消归档传播，需要在每个工作区的 `archived.json` 里加入墓碑记录（并升格式版本），本版本未实现。无论哪种情况，归档内容都无法从仓库恢复：标记落地时会话文件即被删除。
+- 清理是历史重写：本地与远端的历史提交被丢弃（最新树保留）。若多台电脑几乎同时清理，`--force-with-lease` 会让后到者的强推失败并在下一周期重试，不会静默覆盖别人的新提交。
+- 一个会话的同步记录上限 20 条（按时间保留最新），超出后最旧的记录不再显示。
 - 若 harness 上游未来把会话同步并入核心 RPC，可以换回 RPC 原生变体，引擎无需改动。
 
 ## 许可证

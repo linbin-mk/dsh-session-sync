@@ -30,12 +30,14 @@ export interface SyncLogEntry {
   archived?: number
   /** Archived repo artifacts the completed cycle deleted (success). */
   deleted?: number
-  /** Repo artifacts the completed cycle retired because the pin selection dropped them (success). */
-  deletedUnpinned?: number
-  /** Sessions the completed cycle pinned to mirror the repo's selection (success). */
-  pinned?: number
-  /** Sessions the completed cycle unpinned because the repo's selection dropped them (success). */
-  unpinned?: number
+  /** Repo artifacts the completed cycle retired because the selection dropped them (success). */
+  deletedUnselected?: number
+  /** Repo selection entries the completed cycle mirrored into this machine's selection (success). */
+  adopted?: number
+  /** Local entries the completed cycle removed because the repo's selection dropped them (success). */
+  dropped?: number
+  /** Repo workspaces whose selected sessions the cycle could not place locally (success). */
+  pending?: number
   /** Commits the git-space cleanup dropped right after the cycle (success). */
   cleanupDropped?: number
   /** Conflict-copy paths the completed cycle wrote (success). */

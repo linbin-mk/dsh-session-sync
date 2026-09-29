@@ -11,7 +11,6 @@ function settings(overrides: Partial<SessionSyncSettings> = {}): SessionSyncSett
     remote: '',
     branch: DEFAULT_BRANCH,
     intervalMinutes: DEFAULT_INTERVAL_MINUTES,
-    mappings: [],
     cleanup: {
       enabled: false,
       periodHours: DEFAULT_CLEANUP_PERIOD_HOURS,
@@ -35,8 +34,13 @@ describe('Config', () => {
 
   it('carries exactly the stored settings fields plus the deployment startup delay', () => {
     expect(Object.keys(Config.dict ?? {})).toEqual([
-      'startupSyncDelayMs', 'enabled', 'remote', 'branch', 'intervalMinutes', 'mappings', 'cleanup',
+      'startupSyncDelayMs', 'enabled', 'remote', 'branch', 'intervalMinutes', 'cleanup',
     ])
+  })
+
+  it('has no project-mapping field: v2 selects sessions individually', () => {
+    expect(Object.keys(Config.dict ?? {})).not.toContain('mappings')
+    expect(readSettings(Config({}))).not.toHaveProperty('mappings')
   })
 
   it('exposes every user-editable field as a live reference and the startup delay as an ordinary value', () => {
@@ -46,7 +50,6 @@ describe('Config', () => {
       remote: 'git@example.com:team/repo.git',
       branch: 'trunk',
       intervalMinutes: 30,
-      mappings: [{ key: 'demo', path: '/work/demo' }],
       cleanup: { enabled: true, periodHours: 48, keepCommits: 20 },
     })
     expect(config.startupSyncDelayMs).toBe(1_234)
@@ -54,20 +57,18 @@ describe('Config', () => {
     expect(config.remote.get()).toBe('git@example.com:team/repo.git')
     expect(config.branch.get()).toBe('trunk')
     expect(config.intervalMinutes.get()).toBe(30)
-    expect(config.mappings.get()).toEqual([{ key: 'demo', path: '/work/demo' }])
     expect(config.cleanup.get()).toEqual({ enabled: true, periodHours: 48, keepCommits: 20 })
     expect(readSettings(config)).toEqual(settings({
       enabled: true,
       remote: 'git@example.com:team/repo.git',
       branch: 'trunk',
       intervalMinutes: 30,
-      mappings: [{ key: 'demo', path: '/work/demo' }],
       cleanup: { enabled: true, periodHours: 48, keepCommits: 20 },
     }))
   })
 
   it('marks exactly the user-editable fields volatile, so only they make a settings form', () => {
-    expect(['enabled', 'remote', 'branch', 'intervalMinutes', 'mappings', 'cleanup']
+    expect(['enabled', 'remote', 'branch', 'intervalMinutes', 'cleanup']
       .every(field => fieldMeta(field).volatile === true)).toBe(true)
     expect(fieldMeta('startupSyncDelayMs').volatile).toBeUndefined()
   })
@@ -75,8 +76,8 @@ describe('Config', () => {
   it('detaches the section it returns from later live changes', () => {
     const config = Config({})
     const before = readSettings(config)
-    before.mappings.push({ key: 'added', path: '/work/added' })
     before.cleanup.periodHours = 1
+    before.remote = 'mutated'
     expect(readSettings(config)).toEqual(settings())
   })
 
@@ -105,7 +106,6 @@ describe('validateSessionSyncSettings', () => {
       validateSessionSyncSettings(settings({
         enabled: true,
         remote: 'git@example.com:team/repo.git',
-        mappings: [{ key: 'demo', path: '/work/demo' }],
       }))
     }).not.toThrow()
   })
@@ -121,25 +121,11 @@ describe('validateSessionSyncSettings', () => {
     expect(() => { validateSessionSyncSettings(settings({ branch: ' ' })) }).toThrow(/branch must not be blank/)
   })
 
-  it('rejects blank mapping keys and paths', () => {
+  it('imposes no per-project configuration rules, because it stores none', () => {
+    // v1 rejected blank and duplicate mapping keys and paths. v2 has no such
+    // field, so the only cross-field rules left are the remote and the branch.
     expect(() => {
-      validateSessionSyncSettings(settings({ mappings: [{ key: ' ', path: '/a' }] }))
-    }).toThrow(/mappings\[0\]\.key must not be blank/)
-    expect(() => {
-      validateSessionSyncSettings(settings({ mappings: [{ key: 'demo', path: '' }] }))
-    }).toThrow(/mappings\[0\]\.path must not be blank/)
-  })
-
-  it('rejects duplicate keys and duplicate paths', () => {
-    expect(() => {
-      validateSessionSyncSettings(settings({
-        mappings: [{ key: 'demo', path: '/a' }, { key: 'demo', path: '/b' }],
-      }))
-    }).toThrow(/duplicate mapping key "demo"/)
-    expect(() => {
-      validateSessionSyncSettings(settings({
-        mappings: [{ key: 'a', path: '/same' }, { key: 'b', path: '/same' }],
-      }))
-    }).toThrow(/duplicate mapping path "\/same"/)
+      validateSessionSyncSettings(settings({ enabled: true, remote: 'git@x:y/z.git', branch: 'main' }))
+    }).not.toThrow()
   })
 })

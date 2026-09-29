@@ -2,70 +2,24 @@
 /** Sync status footer: visibility gating, health dot, and the last-sync detail. */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
-import { bindSnapshotSelector, FakeConfigForm, makeTranslate } from './helpers.ts'
+import { bindSnapshotSelector, FakeConfigForm, fakeSyncApi, makeTranslate, statusView } from './helpers.ts'
 import { SyncStatusFooter } from '../src/client/SyncStatusFooter.tsx'
 import type { SyncStatusFooterInjected, SyncStatusFooterProps } from '../src/client/SyncStatusFooter.tsx'
 import { SyncSectionController } from '../src/client/controller.ts'
 import type { SyncSettingsDraft } from '../src/client/controller.ts'
 import type { SyncApi } from '../src/client/api.ts'
-
 import { zh } from '../src/client/locales.ts'
-
 
 afterEach(cleanup)
 
 const t = makeTranslate(zh) as SyncStatusFooterInjected['t']
 
-const baseStatus = {
-  configured: false,
-  repoReady: false,
-  running: false,
-  pinnedCount: 0,
-  lastRun: { imported: 0, pushed: 0, archived: 0, deleted: 0, deletedUnpinned: 0, pinned: 0, unpinned: 0, conflicts: [] },
-}
-
-interface FakeApi {
-  getSettings: ReturnType<typeof vi.fn>
-  updateSettings: ReturnType<typeof vi.fn>
-  status: ReturnType<typeof vi.fn>
-  syncNow: ReturnType<typeof vi.fn>
-  cleanupNow: ReturnType<typeof vi.fn>
-  logs: ReturnType<typeof vi.fn>
-}
-
-function fakeApi(options: {
-  configured?: boolean
-  running?: boolean
-  lastError?: string
-  lastSyncAt?: string
-  pinnedCount?: number
-} = {}): FakeApi {
-  return {
-    getSettings: vi.fn(() => Promise.resolve({
-      writable: true,
-      settings: { enabled: options.configured ?? false, remote: '', branch: 'main', intervalMinutes: 5, mappings: [] },
-    })),
-    updateSettings: vi.fn(() => Promise.resolve()),
-    status: vi.fn(() => Promise.resolve({
-      ...baseStatus,
-      configured: options.configured ?? false,
-      running: options.running ?? false,
-      pinnedCount: options.pinnedCount ?? 0,
-      ...options.lastError === undefined ? {} : { lastError: options.lastError },
-      ...options.lastSyncAt === undefined ? {} : { lastSyncAt: options.lastSyncAt },
-    })),
-    syncNow: vi.fn(() => Promise.resolve(baseStatus)),
-    cleanupNow: vi.fn(() => Promise.resolve(baseStatus)),
-    logs: vi.fn(() => Promise.resolve([])),
-  }
-}
-
 async function mount(options: {
-  api?: FakeApi
+  api?: ReturnType<typeof fakeSyncApi>
   wide?: boolean
 } = {}) {
-  const api = options.api ?? fakeApi()
-  const controller = new SyncSectionController(api as SyncApi, new FakeConfigForm<SyncSettingsDraft>())
+  const api = options.api ?? fakeSyncApi()
+  const controller = new SyncSectionController(api as unknown as SyncApi, new FakeConfigForm<SyncSettingsDraft>())
   const injected: SyncStatusFooterInjected = {
     controller,
     t,
@@ -94,34 +48,49 @@ describe('SyncStatusFooter', () => {
   })
 
   it('shows the normal state with the last sync instant', async () => {
-    const now = '2026-08-16T08:30:00.000Z'
-    await mount({ api: fakeApi({ configured: true, lastSyncAt: now }) })
+    await mount({
+      api: fakeSyncApi({ status: statusView({ configured: true, lastSyncAt: '2026-08-16T08:30:00.000Z' }) }),
+    })
     expect(screen.getByText(t('statusNormal'), { exact: false })).toBeTruthy()
     expect(screen.getByText(new RegExp(t('lastSyncAt', { time: '' }).slice(0, 4)), { exact: false })).toBeTruthy()
   })
 
   it('shows the abnormal state and surfaces the failure on hover text', async () => {
-    await mount({ api: fakeApi({ configured: true, lastError: 'git push failed', lastSyncAt: '2026-08-16T08:30:00.000Z' }) })
+    await mount({
+      api: fakeSyncApi({
+        status: statusView({
+          configured: true,
+          lastError: 'git push failed',
+          lastErrorAt: '2026-08-16T08:30:00.000Z',
+          lastSyncAt: '2026-08-16T08:30:00.000Z',
+        }),
+      }),
+    })
     expect(screen.getByText(t('statusAbnormal'), { exact: false })).toBeTruthy()
     expect(screen.getByRole('button').title).toContain('git push failed')
   })
 
-  it('shows an unparsable last-sync instant verbatim', async () => {
-    await mount({ api: fakeApi({ configured: true, pinnedCount: 3, lastSyncAt: '2026-08-16T08:30:00.000Z' }) })
+  it('names the synced session count beside the last sync instant', async () => {
+    await mount({
+      api: fakeSyncApi({ status: statusView({ configured: true, syncedCount: 3, lastSyncAt: '2026-08-16T08:30:00.000Z' }) }),
+    })
     // The selection size is what actually syncs, so the footer names it.
-    expect(screen.getByText(new RegExp(t('pinnedCount', { count: 3 }).slice(0, 4)), { exact: false })).toBeTruthy()
+    expect(screen.getByText(new RegExp(t('syncedCount', { count: 3 }).slice(0, 4)), { exact: false })).toBeTruthy()
 
-    await mount({ api: fakeApi({ configured: true, lastSyncAt: 'garbage' }) })
+    await mount({ api: fakeSyncApi({ status: statusView({ configured: true, lastSyncAt: 'garbage' }) }) })
     expect(screen.getByText(new RegExp('garbage'), { exact: false })).toBeTruthy()
   })
 
   it('shows the syncing state while a cycle runs', async () => {
-    await mount({ api: fakeApi({ configured: true, running: true }) })
+    await mount({ api: fakeSyncApi({ status: statusView({ configured: true, running: true }) }) })
     expect(screen.getByText(t('syncing'), { exact: false })).toBeTruthy()
   })
 
   it('collapses to the rail dot without the text', async () => {
-    await mount({ api: fakeApi({ configured: true, lastSyncAt: '2026-08-16T08:30:00.000Z' }), wide: false })
+    await mount({
+      api: fakeSyncApi({ status: statusView({ configured: true, lastSyncAt: '2026-08-16T08:30:00.000Z' }) }),
+      wide: false,
+    })
     expect(screen.queryByText(t('statusNormal'), { exact: false })).toBeNull()
     expect(screen.getByRole('button').getAttribute('aria-label')).toBe(t('statusNormal'))
   })
@@ -129,8 +98,8 @@ describe('SyncStatusFooter', () => {
   it('refreshes the status view on a timer', async () => {
     vi.useFakeTimers()
     try {
-      const api = fakeApi({ configured: true })
-      const controller = new SyncSectionController(api as SyncApi, new FakeConfigForm<SyncSettingsDraft>())
+      const api = fakeSyncApi({ status: statusView({ configured: true }) })
+      const controller = new SyncSectionController(api as unknown as SyncApi, new FakeConfigForm<SyncSettingsDraft>())
       const injected: SyncStatusFooterInjected = {
         controller,
         t,

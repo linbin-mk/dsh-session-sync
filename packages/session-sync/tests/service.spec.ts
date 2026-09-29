@@ -61,14 +61,49 @@ async function seedRemote(bare: string, files: readonly RemoteFile[]): Promise<v
   await execFileAsync('git', ['-C', work, 'push', 'origin', 'main'])
 }
 
-/** The repo pin list a remote should carry for the given selection. */
-function pinListFile(ids: readonly string[]): RemoteFile {
+/** Stable repo key and display name the seeded workspace uses. */
+const WS_KEY = 'ws-demo'
+const WS_NAME = 'demo'
+
+/** The repo selection snapshot a remote should carry for the given sessions. */
+function selectionFile(ids: readonly string[]): RemoteFile {
   return {
-    path: 'pinned.json',
+    path: 'sync.json',
     content: JSON.stringify({
-      version: 1, updatedAt: '2026-01-01T00:00:00.000Z', host: 'seed', sessionIds: [...ids],
+      version: 2,
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      host: 'seed',
+      entries: ids.map(id => ({
+        id,
+        key: WS_KEY,
+        workspaceName: WS_NAME,
+        title: '',
+        addedAt: '2026-01-01T00:00:00.000Z',
+        addedBy: 'seed',
+      })),
     }) + '\n',
   }
+}
+
+/**
+ * Everything a remote needs for one selected session of the seeded workspace:
+ * the selection, the manifest carrying the join-key name, and the artifact.
+ * Import matches the manifest name against a local workspace title, so all
+ * three travel together.
+ * @param ids - selected session ids to seed.
+ * @returns repo-relative files to commit.
+ */
+function workspaceSeed(ids: readonly string[]): RemoteFile[] {
+  return [
+    selectionFile(ids),
+    {
+      path: `workspaces/${WS_KEY}/manifest.json`,
+      content: JSON.stringify({
+        version: 2, key: WS_KEY, name: WS_NAME, updatedAt: '2026-01-01T00:00:00.000Z',
+      }) + '\n',
+    },
+    ...ids.map(id => ({ path: `workspaces/${WS_KEY}/${id}.jsonl`, content: sessionArtifact(id) })),
+  ]
 }
 
 function sessionHeader(id: string, cwd: string): SessionHeader {
@@ -82,10 +117,10 @@ function sessionHeader(id: string, cwd: string): SessionHeader {
   }
 }
 
-function sessionArtifact(id = 'session-a', project = 'demo'): string {
+function sessionArtifact(id = 'session-a', workspace = WS_KEY): string {
   return [
     JSON.stringify({
-      type: 'dsh-session-sync', version: 1, project, inheritedEventCount: 0,
+      type: 'dsh-session-sync', version: 2, workspace, inheritedEventCount: 0,
       session: { version: SESSION_FORMAT_VERSION, id, createdAt: 1, isSeeded: false, delegationDepth: 0 },
     }),
     JSON.stringify({ type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } }),
@@ -191,8 +226,8 @@ describe('SessionSyncService', () => {
       repoReady: false,
       running: false,
       lastRun: {
-        imported: 0, pushed: 0, archived: 0, deleted: 0, deletedUnpinned: 0,
-        pinned: 0, unpinned: 0, conflicts: [],
+        imported: 0, pushed: 0, archived: 0, deleted: 0, deletedUnselected: 0,
+        adopted: 0, dropped: 0, conflicts: [],
       },
     })
 
@@ -220,7 +255,6 @@ describe('SessionSyncService', () => {
         remote: bare,
         branch: 'main',
         intervalMinutes: 5,
-        mappings: [{ key: 'demo', path: project }],
       },
     })
     ctx.on('session-sync/completed', (payload) => { completed.push(payload) })
@@ -230,13 +264,13 @@ describe('SessionSyncService', () => {
     expect(service.status().configured).toBe(true)
     expect(service.status().repoReady).toBe(true)
     expect(service.status().lastRun).toEqual({
-      imported: 0, pushed: 0, archived: 0, deleted: 0, deletedUnpinned: 0,
-      pinned: 0, unpinned: 0, conflicts: [],
+      imported: 0, pushed: 0, archived: 0, deleted: 0, deletedUnselected: 0,
+      adopted: 0, dropped: 0, conflicts: [],
     })
     expect(completed).toHaveLength(1)
     expect(completed[0]).toMatchObject({
-      imported: 0, pushed: 0, archived: 0, deleted: 0, deletedUnpinned: 0,
-      pinned: 0, unpinned: 0, conflicts: [],
+      imported: 0, pushed: 0, archived: 0, deleted: 0, deletedUnselected: 0,
+      adopted: 0, dropped: 0, conflicts: [],
     })
 
     // The cycle log records the start and the successful outcome.
@@ -276,8 +310,7 @@ describe('SessionSyncService', () => {
           remote: bare,
           branch: 'main',
           intervalMinutes: 1,
-          mappings: [{ key: 'demo', path: project }],
-        },
+          },
         delayMs: 20,
       })
       ctx.on('session-sync/completed', (payload) => { completed.push(payload) })
@@ -317,8 +350,7 @@ describe('SessionSyncService', () => {
           remote: bare,
           branch: 'main',
           intervalMinutes: 1,
-          mappings: [{ key: 'demo', path: project }],
-        },
+          },
         delayMs: 20,
       })
       ctx.on('session-sync/completed', (payload) => { completed.push(payload) })
@@ -358,7 +390,6 @@ describe('SessionSyncService', () => {
         remote: bare,
         branch: 'main',
         intervalMinutes: 5,
-        mappings: [{ key: 'demo', path: project }],
       },
       delayMs: 20,
       headers: [sessionHeader('session-a', project)],
@@ -383,7 +414,6 @@ describe('SessionSyncService', () => {
         remote: bare,
         branch: 'main',
         intervalMinutes: 5,
-        mappings: [{ key: 'demo', path: project }],
       },
       delayMs: 20,
       dshHome: root,
@@ -393,8 +423,8 @@ describe('SessionSyncService', () => {
     })
     // A repo artifact exists, so both the import and export paths reach the
     // failing readFrom and record contained errors instead of failing.
-    const repoArtifact = join(root, 'session-sync', 'repo', 'projects', 'demo', 'session-a.jsonl')
-    await mkdir(join(root, 'session-sync', 'repo', 'projects', 'demo'), { recursive: true })
+    const repoArtifact = join(root, 'session-sync', 'repo', 'workspaces', WS_KEY, 'session-a.jsonl')
+    await mkdir(join(root, 'session-sync', 'repo', 'workspaces', WS_KEY), { recursive: true })
     await writeFile(repoArtifact, artifact.replace('"cwd":"demo"', '"cwd":"demo"'))
 
     await waitFor(() => service.status().lastSyncAt !== undefined, 'contained-failure cycle')
@@ -417,15 +447,14 @@ describe('SessionSyncService', () => {
         remote: bare,
         branch: 'main',
         intervalMinutes: 5,
-        mappings: [{ key: 'demo', path: project }],
       },
       delayMs: 200,
       dshHome: root,
     })
-    // A file squatting on the `projects` directory makes the listing fail with ENOTDIR.
+    // A file squatting on the `workspaces` directory makes the listing fail with ENOTDIR.
     const repo = join(root, 'session-sync', 'repo')
     await mkdir(repo, { recursive: true })
-    await writeFile(join(repo, 'projects'), 'not a directory')
+    await writeFile(join(repo, 'workspaces'), 'not a directory')
 
     await waitFor(() => service.status().lastError !== undefined, 'filesystem failure')
     expect(service.status().lastError).toContain('ENOTDIR')
@@ -443,25 +472,26 @@ describe('SessionSyncService', () => {
     const coldSnapshot = vi.fn((_meta: unknown, _inheritedEventCount: unknown, _events: unknown) => undefined)
     // Only pinned sessions sync, so the selection the next cycle reads must
     // already be on the remote.
-    await seedRemote(bare, [pinListFile(['session-a'])])
+    await seedRemote(bare, [selectionFile(['session-a'])])
     const { service } = await compose({
       settings: {
         enabled: true,
         remote: bare,
         branch: 'main',
         intervalMinutes: 5,
-        mappings: [{ key: 'demo', path: project }],
       },
       delayMs: 20,
       dshHome: root,
       projectionCache: { coldSnapshot },
-      workspaces: fakeWorkspaceRegistry(['session-a']),
+      workspaces: fakeWorkspaceRegistry([{ title: WS_NAME, path: project }]),
     })
 
     const artifact = sessionArtifact()
-    const repoArtifact = join(root, 'session-sync', 'repo', 'projects', 'demo', 'session-a.jsonl')
-    await mkdir(join(root, 'session-sync', 'repo', 'projects', 'demo'), { recursive: true })
+    const repoArtifact = join(root, 'session-sync', 'repo', 'workspaces', WS_KEY, 'session-a.jsonl')
+    await mkdir(join(root, 'session-sync', 'repo', 'workspaces', WS_KEY), { recursive: true })
     await writeFile(repoArtifact, artifact)
+    await writeFile(join(root, 'session-sync', 'repo', 'sync.json'), selectionFile(['session-a']).content)
+    await writeFile(join(root, 'session-sync', 'repo', 'workspaces', WS_KEY, 'manifest.json'), workspaceSeed([])[1]!.content)
 
     await waitFor(() => service.status().lastSyncAt !== undefined && !service.status().running, 'warm-up cycle')
     expect(service.status().lastError).toBeUndefined()
@@ -479,7 +509,6 @@ describe('SessionSyncService', () => {
         remote: '/nonexistent/remote.git',
         branch: 'main',
         intervalMinutes: 5,
-        mappings: [],
       },
     })
 
@@ -509,21 +538,17 @@ describe('SessionSyncService', () => {
 
     // The artifact and the selection that admits it both live on the remote:
     // the next cycle resets its worktree to that state before importing.
-    await seedRemote(bare, [
-      pinListFile(['session-a']),
-      { path: 'projects/demo/session-a.jsonl', content: sessionArtifact() },
-    ])
+    await seedRemote(bare, workspaceSeed(['session-a']))
     const { ctx, service } = await compose({
       settings: {
         enabled: true,
         remote: bare,
         branch: 'main',
         intervalMinutes: 5,
-        mappings: [{ key: 'demo', path: project }],
       },
       delayMs: 20,
       dshHome: root,
-      workspaces: fakeWorkspaceRegistry(['session-a']),
+      workspaces: fakeWorkspaceRegistry([{ title: WS_NAME, path: project }]),
     })
 
     await waitFor(() => service.status().lastSyncAt !== undefined, 'import cycle')
@@ -586,21 +611,17 @@ describe('SessionSyncService', () => {
 
     // Both the artifact and its selection live on the remote so the startup
     // cycle imports it (the cycle resets to the remote state first).
-    await seedRemote(bare, [
-      pinListFile(['session-a']),
-      { path: 'projects/demo/session-a.jsonl', content: sessionArtifact() },
-    ])
+    await seedRemote(bare, workspaceSeed(['session-a']))
     const first = await compose({
       settings: {
         enabled: true,
         remote: bare,
         branch: 'main',
         intervalMinutes: 5,
-        mappings: [{ key: 'demo', path: project }],
       },
       delayMs: 20,
       dshHome: root,
-      workspaces: fakeWorkspaceRegistry(['session-a']),
+      workspaces: fakeWorkspaceRegistry([{ title: WS_NAME, path: project }]),
     })
 
     const marksFile = join(root, 'session-sync', 'switch-notices.json')
@@ -636,7 +657,6 @@ describe('SessionSyncService', () => {
         remote: bare,
         branch: 'main',
         intervalMinutes: 5,
-        mappings: [{ key: 'demo', path: project }],
       },
       delayMs: 60_000,
       dshHome: root,
@@ -676,7 +696,6 @@ describe('SessionSyncService', () => {
         remote: bare,
         branch: 'main',
         intervalMinutes: 5,
-        mappings: [],
         cleanup: { enabled: false, periodHours: 24, keepCommits: 1 },
       },
       // No startup cycle: the worktree below is prepared by hand.
@@ -742,8 +761,7 @@ describe('SessionSyncService', () => {
           remote: bare,
           branch: 'main',
           intervalMinutes: 1,
-          mappings: [],
-          cleanup: { enabled: true, periodHours: 1, keepCommits: 200 },
+            cleanup: { enabled: true, periodHours: 1, keepCommits: 200 },
         },
         delayMs: 20,
         dshHome: root,
