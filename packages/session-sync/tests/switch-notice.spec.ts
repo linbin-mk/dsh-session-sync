@@ -127,4 +127,49 @@ describe('withSwitchNotice', () => {
     expect(reviewed.decision.messages).toEqual(claimed)
     expect(reviewed.consumed).toBe(false)
   })
+
+  it('folds the notice without dropping a series marker an upstream driver set', () => {
+    // This listener runs after `next()`, so the goal round driver has already
+    // returned `{...decision, startsRequestSeries: true}` (goal-round-driver
+    // src/index.ts:428). Rebuilding the decision as `{kind, messages}` used to
+    // drop the marker, so the agent loop (`agent-loop` src/agent.ts:415) never
+    // opened a distinct request series — the round silently continued the
+    // previous one instead.
+    const pending = new Set(['session-a'])
+    const claimed = [userMessage()]
+    const decision: PreStepDecision = { kind: 'enter', messages: [...claimed], startsRequestSeries: true }
+    const reviewed = withSwitchNotice(pending, agent('session-a'), claimed, decision)
+
+    expect(reviewed.consumed).toBe(true)
+    expect(reviewed.decision.kind).toBe('enter')
+    if (reviewed.decision.kind !== 'enter') return
+    expect(reviewed.decision.startsRequestSeries).toBe(true)
+    expect(reviewed.decision.messages).toHaveLength(2)
+    expect(reviewed.decision.messages[1].source).toMatchObject({ kind: SWITCH_NOTICE_PLUGIN, form: 'notice' })
+  })
+
+  it('keeps the series marker on the append-at-the-end path too', () => {
+    const pending = new Set(['session-a'])
+    const rewritten = pluginMessage('rewritten by another listener')
+    const decision: PreStepDecision = { kind: 'enter', messages: [rewritten], startsRequestSeries: true }
+    const reviewed = withSwitchNotice(pending, agent('session-a'), [userMessage()], decision)
+
+    expect(reviewed.consumed).toBe(true)
+    expect(reviewed.decision.kind).toBe('enter')
+    if (reviewed.decision.kind !== 'enter') return
+    expect(reviewed.decision.startsRequestSeries).toBe(true)
+    expect(reviewed.decision.messages).toHaveLength(2)
+    expect(reviewed.decision.messages[0]).toBe(rewritten)
+  })
+
+  it('leaves a decision with no series marker without one', () => {
+    // The negation guards against "fixing" this by hardcoding the field on.
+    const pending = new Set(['session-a'])
+    const claimed = [userMessage()]
+    const reviewed = withSwitchNotice(pending, agent('session-a'), claimed, enter(claimed))
+
+    if (reviewed.decision.kind !== 'enter') return
+    expect(reviewed.decision.startsRequestSeries).toBeUndefined()
+    expect('startsRequestSeries' in reviewed.decision).toBe(false)
+  })
 })

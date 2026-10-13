@@ -94,5 +94,11 @@ export function withSwitchNotice(
   const entered = lastClaimedIndex === -1
     ? [...decision.messages, notice]
     : decision.messages.toSpliced(lastClaimedIndex + 1, 0, notice)
-  return { decision: { kind: 'enter', messages: entered }, consumed: true }
+  // Spread rather than rebuild: the `enter` variant carries more than `kind`
+  // and `messages`. This listener runs *after* `next()`, so an upstream producer
+  // has already had its say — the goal round driver sets `startsRequestSeries`
+  // to open a distinct model-request series, and rebuilding the object as
+  // `{ kind, messages }` silently downgraded that to a continuation of the
+  // previous series. Spreading also carries any field the harness adds later.
+  return { decision: { ...decision, messages: entered }, consumed: true }
 }
