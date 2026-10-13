@@ -236,6 +236,22 @@ describe('parsePortableSession', () => {
       session: { version: SESSION_FORMAT_VERSION, id: 'session-test', createdAt: 1000, isSeeded: true },
     })), '/local/demo')).toThrow(/exceeds the event log/)
   })
+
+  it('accepts a harness-native event type only the current peer knows', () => {
+    // `working-directory/change` enters the harness vocabulary in 0.2.1; the
+    // parser gates on the `dsh-session` peer's own KNOWN_SESSION_EVENT_TYPES,
+    // so an artifact written by a new harness must import here. Pinned to the
+    // older 0.1.7 peer this row was rejected as an unknown *required* type,
+    // which silently made every session that had changed directory unsyncable.
+    const rows = [
+      JSON.stringify({ type: 'working-directory/change', seq: 0, time: 1, data: { cwd: '/local/demo' } }),
+      eventRow(1, 1),
+    ]
+    const parsed = parsePortableSession(artifact(headerLine(), rows), '/local/demo')
+
+    expect(parsed.events).toHaveLength(2)
+    expect(parsed.events[0]).toMatchObject({ type: 'working-directory/change', seq: 0 })
+  })
 })
 
 describe('repo path helpers', () => {

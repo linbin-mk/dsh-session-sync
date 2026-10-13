@@ -97,10 +97,20 @@ logs/            cycle logs
 ## Requirements
 
 - Node.js `^22.19 || >=24`
-- DeepSeek Harness `0.1.7-rc.2` (all `@deepseek-ai/*` dependencies use published npm versions; no local harness links)
-- The peer line both packages declare: `@deepseek-ai/cordis ^4.0.4`, `@deepseek-ai/schemastery ^3.18.4`, `cordis-plugin-loader ^1.0.5`, `cordis-plugin-include ^1.0.9`
+- DeepSeek Harness `0.2.1-alpha.2` (all `@deepseek-ai/*` dependencies use published npm versions; no local harness links)
+- The peer line both packages declare: `@deepseek-ai/cordis ^4.0.5-alpha.1`, `@deepseek-ai/schemastery ^3.18.5-alpha.1`, `cordis-plugin-loader ^1.0.6-alpha.1`, `cordis-plugin-include ^1.0.10-alpha.1`
 - `git` on PATH and an SSH key for the sync remote (host key checking: `StrictHostKeyChecking=accept-new`)
 - pnpm, but only when building from source
+
+### 0.7.0 breaking change: tracking harness `0.2.1-alpha.2`
+
+- **The whole `@deepseek-ai/*` line moves from `0.1.7-rc.2` to `0.2.1-alpha.2`**: `cordis ^4.0.5-alpha.1`, `schemastery ^3.18.5-alpha.1`, `cordis-plugin-loader ^1.0.6-alpha.1`, `cordis-plugin-include ^1.0.10-alpha.1`.
+
+  The harness now validates every plugin's `@deepseek-ai/dsh-*` peers at composition time: `evaluatePluginCompatibility()` runs `semver.satisfies(runtime, range, { includePrerelease: true })` against the running dsh version, and an unsatisfied peer marks the row `disabled` with a `disabling profile plugin …` line on stderr. A `0.x` caret does not cross a minor and a prerelease additionally requires an identical `major.minor.patch`, so `^0.1.7-rc.2` does not match `0.2.1-alpha.2` — meaning **the old peer line gets the whole `session-sync` row disabled on harness 0.2.1**: not degraded, not warned about, simply never loaded. `^0.2.1-alpha.2` passes the check (and passes it under `includePrerelease: true` too).
+
+  The package also gains `engines.dsh: ^0.2.1-alpha.2`, recording the floor where the harness's own `DshEnginesManifest` expects it. That field is **declarative** today — nothing reads it — so the peer check above is the real gate.
+- **This incidentally fixes a class of import failures.** Harness 0.2.1 adds the session event `working-directory/change` (60 event types), and artifact import validates against the `dsh-session` peer's own `KNOWN_SESSION_EVENT_TYPES` (`src/format.ts:385`; the import side only). On the older peer, a session whose log carries that event was rejected on **import** as an unknown *required* type — so any session that had changed directory never landed on the other machine. The new peer accepts it, and `tests/format.spec.ts` now pins that with a regression test.
+- `@deepseek-ai/dsh-invariants` was removed from the harness in the 0.2.x line; its stale entry is gone from the `pnpm-workspace.yaml` release-age exemption list. The plugin never imported it.
 
 ### 0.6.0 breaking change: the two packages became one
 
@@ -133,7 +143,7 @@ cd dsh-session-sync
 pnpm install && pnpm build
 pnpm --dir packages/session-sync pack
 
-dsh plugin --profile web-sync add ./linbin-mk-dsh-session-sync-0.6.0.tgz
+dsh plugin --profile web-sync add ./linbin-mk-dsh-session-sync-*.tgz
 ```
 
 Remove both from the same profile:

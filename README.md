@@ -97,10 +97,20 @@ logs/            周期日志
 ## 环境要求
 
 - Node.js `^22.19 || >=24`
-- DeepSeek Harness `0.1.7-rc.2`（所有 `@deepseek-ai/*` 依赖均使用 npm 发布版本，不含本机 harness 链接）
-- 两个包声明的 peer 线：`@deepseek-ai/cordis ^4.0.4`、`@deepseek-ai/schemastery ^3.18.4`、`cordis-plugin-loader ^1.0.5`、`cordis-plugin-include ^1.0.9`
+- DeepSeek Harness `0.2.1-alpha.2`（所有 `@deepseek-ai/*` 依赖均使用 npm 发布版本，不含本机 harness 链接）
+- 两个包声明的 peer 线：`@deepseek-ai/cordis ^4.0.5-alpha.1`、`@deepseek-ai/schemastery ^3.18.5-alpha.1`、`cordis-plugin-loader ^1.0.6-alpha.1`、`cordis-plugin-include ^1.0.10-alpha.1`
 - PATH 中有 `git`，且同步远端需要 SSH key（host key 策略：`StrictHostKeyChecking=accept-new`）
 - 只有从源码构建时才需要 pnpm
+
+### 0.7.0 破坏性变更：跟随 harness `0.2.1-alpha.2`
+
+- **整条 `@deepseek-ai/*` 依赖线从 `0.1.7-rc.2` 升到 `0.2.1-alpha.2`**：`cordis ^4.0.5-alpha.1`、`schemastery ^3.18.5-alpha.1`、`cordis-plugin-loader ^1.0.6-alpha.1`、`cordis-plugin-include ^1.0.10-alpha.1`。
+
+  harness 现在会在组合期逐个插件校验 `@deepseek-ai/dsh-*` peer：`evaluatePluginCompatibility()` 拿运行时的 dsh 版本做 `semver.satisfies(runtime, range, { includePrerelease: true })`，不满足就把该行标成 `disabled` 并在 stderr 打一行 `disabling profile plugin …`。而 `0.x` 的 caret 不跨次版本，预发布版本还额外要求 `major.minor.patch` 完全一致——`^0.1.7-rc.2` 匹配不到 `0.2.1-alpha.2`，所以**旧 peer 线会让 `session-sync` 这一行在 harness 0.2.1 上被整个禁用**：不是降级、不是警告，是根本不加载。抬到 `^0.2.1-alpha.2` 后校验通过（`includePrerelease: true` 下同样为真）。
+
+  包同时新增 `engines.dsh: ^0.2.1-alpha.2`，把兼容下限记在 harness 自己的 `DshEnginesManifest` 位置上。该字段目前是**声明性**的——没有任何读取方强制它，上面那道 peer 校验才是真正的闸门。
+- **顺带修掉一类导入失败。** harness 0.2.1 给会话事件表加了 `working-directory/change`（事件类型总数 60），而工件导入是照 `dsh-session` 自己那份 `KNOWN_SESSION_EVENT_TYPES` 校验的（`src/format.ts:385`，只作用于导入侧）。仍用旧 peer 时，日志里含这个事件的会话会在**导入**时被判成「未知的必需事件类型」而拒绝——切换过工作目录的会话就落不到另一台机器上。换到新 peer 后自然接受，`tests/format.spec.ts` 加了回归测试钉住。
+- `@deepseek-ai/dsh-invariants` 已在 0.2.x 被 harness 删除，`pnpm-workspace.yaml` 的 release-age 豁免表里那条随之清掉；插件从未 import 它，仅是过期条目。
 
 ### 0.6.0 破坏性变更：两个包合并成一个
 
@@ -133,7 +143,7 @@ cd dsh-session-sync
 pnpm install && pnpm build
 pnpm --dir packages/session-sync pack
 
-dsh plugin --profile web-sync add ./linbin-mk-dsh-session-sync-0.6.0.tgz
+dsh plugin --profile web-sync add ./linbin-mk-dsh-session-sync-*.tgz
 ```
 
 从同一个 profile 移除：

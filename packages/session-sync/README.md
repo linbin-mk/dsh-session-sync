@@ -26,7 +26,7 @@ dsh-session-sync 插件的 host 半边：DeepSeek Harness 的 git 后端自动�
     startupSyncDelayMs: 3000
 ```
 
-`config` 里的 `startupSyncDelayMs` 是部署项；`enabled`、`remote`、`branch`、`intervalMinutes`、`cleanup` 是设置页可写的活字段，写入由 harness 的 settings 服务落到 profile patch 文档。要求 DeepSeek Harness `0.1.7-rc.2`（peer：`@deepseek-ai/cordis ^4.0.4`、`@deepseek-ai/schemastery ^3.18.4`、`cordis-plugin-loader ^1.0.5`、`cordis-plugin-include ^1.0.9`）。要求 `settings` 与 `sessionPersistence` 服务；`workspaceRegistry` 是落位能力（按名匹配、按 cwd 反查、归档标记应用都要它，缺少时导出与导入都会被跳过并报告）；`sessionProjectionCache` 可选（导入后预热；设置页也用它零 I/O 读标题）。`webServer` 同样可选——没有它时插件以 headless 运行，只是不提供 Web 路由。切换提醒监听 harness 的 `agent/pre-step` 事件（`dsh-agent`/`dsh-llm` 依赖）：没有 agent 服务的部署只是永远不会触发注入。
+`config` 里的 `startupSyncDelayMs` 是部署项；`enabled`、`remote`、`branch`、`intervalMinutes`、`cleanup` 是设置页可写的活字段，写入由 harness 的 settings 服务落到 profile patch 文档。要求 DeepSeek Harness `0.2.1-alpha.2`（peer：`@deepseek-ai/cordis ^4.0.5-alpha.1`、`@deepseek-ai/schemastery ^3.18.5-alpha.1`、`cordis-plugin-loader ^1.0.6-alpha.1`、`cordis-plugin-include ^1.0.10-alpha.1`）。要求 `settings` 与 `sessionPersistence` 服务；`workspaceRegistry` 是落位能力（按名匹配、按 cwd 反查、归档标记应用都要它，缺少时导出与导入都会被跳过并报告）；`sessionProjectionCache` 可选（导入后预热；设置页也用它零 I/O 读标题）。`webServer` 同样可选——没有它时插件以 headless 运行，只是不提供 Web 路由。切换提醒监听 harness 的 `agent/pre-step` 事件（`dsh-agent`/`dsh-llm` 依赖）：没有 agent 服务的部署只是永远不会触发注入。
 
 ## 仓库格式 v2
 
