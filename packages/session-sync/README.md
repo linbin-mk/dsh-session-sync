@@ -72,7 +72,7 @@ conflicts/<key>/<session-id>-<host>.jsonl
 
 ## 浏览器半边
 
-`src/client/` 是 Web 客户端那一半：设置页（`settings.section` id `sync`）、侧栏状态点（`sidebar.footer.action` id `session-sync-status`）、会话行菜单项（`sidebar.workspaces.session.menu.item` id `session-sync.toggle`，order 500）与同步记录弹窗（`shell.overlay` id `session-sync.dialog`）。
+`src/client/` 是 Web 客户端那一半：设置页（`settings.section` id `sync`，四张卡片 + 吸底保存条，集合树在 `SyncSelectionTree.tsx`）、侧栏状态点（`sidebar.footer.action` id `session-sync-status`）、会话行菜单项（`sidebar.workspaces.session.menu.item` id `session-sync.toggle`，order 500）与同步记录弹窗（`shell.overlay` id `session-sync.dialog`）。集合树刻意复刻侧栏会话树的行结构（34px 工作区行、32px 会话行、16px leading 槽、尾部相对时间换成「…」菜单），用的也是同一批 `ui-primitives` 原语（图标、`StateDot`、`Menu`、`Tag`、`relativeTime`），所以两处不会各自漂移；侧栏那套组件是 harness 私有源码、发布包里也没有 `src/`，第三方插件只能这样对齐。
 
 设置段的读写走 harness 通用的 config form（`ctx.configForms.get('session-sync')`：读取、订阅推送，写入是带修订号围栏的 `mutate`），因此不碰 harness 的 RPC 表；状态、集合树、手动同步/清理与每会话记录经 host 自建的同源 HTTP API（`/session-sync/*`，普通 `fetch`）传输。Host 把偏好保留在浏览器进程内的页面（非 loopback，`mode: 'memory'`）只读展示配置、禁用全部写入控件；config form 把 host 的拒绝压成 `false`，此时页面再用插件的 `POST /session-sync/settings` 取回拒绝原因。工作区选项来自标准的 `useWorkspaces` hook。
 

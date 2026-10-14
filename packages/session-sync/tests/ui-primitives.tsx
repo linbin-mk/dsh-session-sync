@@ -69,3 +69,128 @@ export function Modal({
     </div>
   )
 }
+
+/**
+ * The real Switch is a `role="switch"` button keyed by aria-checked; the double
+ * keeps exactly that contract, because every spec reaches for it by role and
+ * name and reads its state through aria-checked.
+ */
+export function Switch({
+  checked, onChange, label, disabled = false, title, className,
+}: {
+  checked: boolean
+  onChange: (next: boolean) => void
+  label: string
+  disabled?: boolean
+  title?: string
+  className?: string
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      title={title}
+      className={className}
+      onClick={() => { onChange(!checked) }}
+    />
+  )
+}
+
+/** The real Tag is a capsule span whose palette rides `data-tone`. */
+export function Tag({ tone = 'outline', className, children }: {
+  tone?: string
+  className?: string
+  children?: ReactNode
+}) {
+  return <span data-tone={tone} className={className}>{children}</span>
+}
+
+/** The real StateDot paints a 6px currentColor core keyed by `data-state`. */
+export function StateDot({ state, size, className }: {
+  state: string
+  size?: number
+  className?: string
+  appearance?: 'dot' | 'step'
+}) {
+  return <span data-state={state} data-size={size} className={className} />
+}
+
+/**
+ * The real Menu portals an anchored dropdown whose rows are data entries or
+ * component rows. The double renders the anchor with the same inline list, so a
+ * spec can click the trigger and then the row without reproducing placement,
+ * dismissal, or the keyboard walk.
+ */
+export function Menu({
+  open, anchor, items = [], children, onSelect, onClose, className,
+}: {
+  open: boolean
+  anchor: ReactNode
+  items?: readonly { id: string; label: ReactNode; disabled?: boolean }[]
+  children?: ReactNode
+  onSelect?: (id: string) => void
+  onClose?: () => void
+  align?: 'start' | 'end'
+  side?: 'bottom' | 'top' | 'right'
+  portal?: boolean
+  closeOnPointerLeave?: boolean
+  dense?: boolean
+  compact?: boolean
+  className?: string
+}) {
+  return (
+    <span className={className}>
+      {anchor}
+      {open && (
+        <div role="menu">
+          {onClose !== undefined && <button type="button" aria-label="close-menu" onClick={onClose} />}
+          {items.map(item => (
+            <button
+              key={item.id}
+              type="button"
+              role="menuitem"
+              disabled={item.disabled === true}
+              onClick={() => { onSelect?.(item.id) }}
+            >
+              {item.label}
+            </button>
+          ))}
+          {children}
+        </div>
+      )}
+    </span>
+  )
+}
+
+/**
+ * Compact relative-time bucketing, mirroring the primitive the shipped sidebar
+ * dates its rows with (`now` / minutes / hours / days / months / years) so the
+ * specs pin the same buckets the real surface produces.
+ */
+export function relativeTime(at: number, now: number): { unit: 'now' | 'minutes' | 'hours' | 'days' | 'months' | 'years'; n: number } {
+  const MIN = 60_000
+  const HOUR = 3_600_000
+  const DAY = 86_400_000
+  const diff = Math.max(0, now - at)
+  if (diff < MIN) return { unit: 'now', n: 0 }
+  if (diff < HOUR) return { unit: 'minutes', n: Math.floor(diff / MIN) }
+  if (diff < DAY) return { unit: 'hours', n: Math.floor(diff / HOUR) }
+  if (diff < 30 * DAY) return { unit: 'days', n: Math.floor(diff / DAY) }
+  if (diff < 365 * DAY) return { unit: 'months', n: Math.floor(diff / (30 * DAY)) }
+  return { unit: 'years', n: Math.floor(diff / (365 * DAY)) }
+}
+
+/** One icon double: the glyph identity is all a spec asserts. */
+function icon(name: string) {
+  return function Icon({ className }: { size?: number; className?: string }) {
+    return <svg data-icon={name} className={className} />
+  }
+}
+
+export const IconFolderOpenRegular = icon('IconFolderOpenRegular')
+export const IconFolderCloseRegular = icon('IconFolderCloseRegular')
+export const IconTriangleRightFillRegular = icon('IconTriangleRightFillRegular')
+export const IconEllipsisOutlineRegular = icon('IconEllipsisOutlineRegular')

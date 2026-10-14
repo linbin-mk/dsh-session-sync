@@ -1,0 +1,242 @@
+/* The collection tree mirrors the sidebar's session tree row-for-row: a 34px
+ * workspace row (folder glyph in a 16px leading slot, expand arrow taking the
+ * same slot on hover/focus), 32px session rows (same slot column, clipped
+ * title, 10px trailing relative time), and the same hover-fill language. The
+ * sidebar cannot be imported (it is not a platform module), so the anatomy is
+ * reproduced here with the same primitives and the same measurements.
+ *
+ * Every color resolves through a `--dsw-alias-*` token. Bare `--border` /
+ * `--surface` / `--text-*` names, which nothing in this app defines, would
+ * render the light-mode literals written as their fallbacks and stay light
+ * under the dark theme. */
+
+.tree {
+  display: flex;
+  flex-direction: column;
+  padding: 2px 0 4px;
+}
+
+.group + .group {
+  margin-top: 4px;
+}
+
+/* Workspace row: the group verb is a real button, so folding is reachable by
+ * keyboard as well as by pointer. */
+.groupRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 34px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--dsw-radius-md);
+  background: transparent;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  color: var(--dsw-alias-label-primary);
+}
+
+.groupRow:hover,
+.groupRow:focus-visible {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.groupRow:focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid
+    var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: -2px;
+}
+
+.slot {
+  flex: none;
+  width: 16px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.folder {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* The folder glyph yields its slot to the expand arrow on hover or keyboard
+ * focus; both occupy 16px, so the title never shifts. */
+.chevron {
+  display: none;
+  color: var(--dsw-alias-label-caption);
+}
+
+.groupRow:hover .chevron,
+.groupRow:focus-visible .chevron {
+  display: inline-flex;
+}
+
+.groupRow:hover .folder,
+.groupRow:focus-visible .folder {
+  display: none;
+}
+
+.arrow {
+  transition: transform 150ms ease;
+}
+
+.arrowOpen {
+  transform: rotate(90deg);
+}
+
+.groupTitle {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.groupTail {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.sessionList {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sessionRow {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 8px;
+  border-radius: var(--dsw-radius-md);
+  color: var(--dsw-alias-label-primary);
+}
+
+.sessionRow:hover,
+.sessionRow[data-menu-open='true'] {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sessionTitle {
+  flex: 1;
+  min-width: 0;
+  margin: 0 6px 0 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+/* A session the repo holds but this machine never imported reads as inactive
+ * and says why in its own tooltip. */
+.sessionRow[data-present='false'] .sessionTitle {
+  color: var(--dsw-alias-label-caption);
+}
+
+.sessionTime {
+  flex: none;
+  font-size: 10px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* The trailing cell swaps time for the row menu. The button keeps its box at
+ * rest (opacity, not display) so the title's width never jumps and the menu
+ * stays reachable by Tab; `pointer-events` keeps the invisible box inert. */
+.sessionActions {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.sessionRow:hover .sessionActions,
+.sessionRow:focus-within .sessionActions,
+.sessionRow[data-menu-open='true'] .sessionActions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.sessionRow:hover .sessionTime,
+.sessionRow:focus-within .sessionTime,
+.sessionRow[data-menu-open='true'] .sessionTime {
+  display: none;
+}
+
+.iconButton {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: var(--dsw-radius-xs);
+  background: transparent;
+  cursor: pointer;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.iconButton:hover,
+.iconButton:focus-visible {
+  color: var(--dsw-alias-label-primary);
+}
+
+/* Unmatched workspace: the repo records it, this machine has no single
+ * same-named workspace, so the folder and the header's tag carry the warning
+ * and the note names the one remedy. No binding affordance exists on purpose. */
+.groupRow[data-unmatched] .folder {
+  color: var(--dsw-alias-state-warn-primary);
+}
+
+.groupNote {
+  margin: 0;
+  padding: 0 8px 6px 30px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 0 4px;
+}
+
+.emptyTitle {
+  margin: 0;
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.emptyHint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}

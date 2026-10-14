@@ -1,25 +1,32 @@
 /**
- * Session-sync settings section: the scope note, the master switch, git
- * remote, branch, cadence, the git-space cleanup controls (periodic history
- * truncation plus a manual run), the read-only selection tree (workspace →
- * session), the read-only pending-workspace list, and the manual sync action
- * with the host status. Edits stay in a draft: the Save button writes exactly
- * the changed fields, Reset drops them, and the local validation mirrors the
- * host's cross-field rules so a mistake is named beside its field. Nothing is
- * committed merely because a field lost focus.
+ * Session-sync settings page: four cards over one read-only bottom bar.
  *
- * v2 removed the project-mapping editor: what synchronizes is the explicit
- * session selection, built from the session row's "..." menu and rendered
- * here for reading only. The pending list deliberately offers no binding
- * action — creating a same-named workspace locally is the whole remedy.
+ * The page is organized by what each group is for rather than by the order the
+ * fields were added — sync settings (the switch, the repository, the branch and
+ * cadence), the synced-session collection, git-space cleanup, and the runtime
+ * status with the cycle log. Each card owns the actions that act on its own
+ * subject: 立即清理 sits in the cleanup card's header, 立即同步 in the status
+ * card's header, and 保存 lives in the bar that appears only while a draft is
+ * dirty. Failures render where their subject is: write failures in the save
+ * bar, selection failures in the collection card, cycle failures in the status
+ * card.
+ *
+ * Edits stay in a draft: the Save button writes exactly the changed fields,
+ * Reset drops them, and the local validation mirrors the host's cross-field
+ * rules so a mistake is named beside its field. Nothing is committed merely
+ * because a field lost focus, and the cleanup controls stay visibly disabled
+ * while periodic cleanup is off — the draft can hold values the host is not
+ * acting on, but the page never pretends they are live.
+ *
+ * The collection tree is read-only here by design and lives in
+ * {@link SyncSelectionTree}: sessions join it from the sidebar row menu, and a
+ * row's only verbs are its records and leaving the selection.
  */
 
-import { useEffect, useState } from 'react'
-import { Button, Input } from '@deepseek-ai/dsh-client-ui-primitives'
+import { useEffect, useId, useState } from 'react'
+import { Button, Input, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { HostObservable, PropsHooks, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type {
-  SessionSyncSelectionSessionView, SessionSyncSelectionView, SyncLogEntry,
-} from '../api.ts'
+import type { SyncLogEntry } from '../api.ts'
 import type { SyncSectionController, SyncSectionState, SyncSettingsDraft } from './controller.ts'
 import { CLEANUP_PERIOD_CHOICES, SYNC_INTERVAL_CHOICES } from './controller.ts'
 import type { en } from './locales.ts'
@@ -27,6 +34,7 @@ import {
   draftFromSettings, isDirty, settingsPatch, validateDraft,
 } from './settings-form.ts'
 import type { ValidationIssue } from './settings-form.ts'
+import { SyncSelectionTree } from './SyncSelectionTree.tsx'
 import css from './SyncSection.module.css'
 
 /** Injected dependencies of {@link SyncSection} (slot `inject`). */
@@ -35,6 +43,8 @@ export interface SyncSectionInjected {
   controller: SyncSectionController
   /** Bare snapshot source; the renderer binds it into the `useSnapshot` prop. */
   hooks: { snapshot: HostObservable<SyncSectionState> }
+  /** Raise the per-session sync records dialog the collection rows open. */
+  requestRecords: (sessionId: string, displayTitle: string) => void
   /** Section copy. */
   t: (key: keyof typeof en, params?: Record<string, unknown>) => string
 }
@@ -58,11 +68,49 @@ function cleanupPeriodOptions(current: number): number[] {
   return [...new Set([...CLEANUP_PERIOD_CHOICES, current])].sort((a, b) => a - b)
 }
 
-/** A human-readable local instant for the last-sync line. */
+/** A human-readable local instant for the status grid and log rows. */
 function displayTime(iso: string): string {
   const parsed = new Date(iso)
   if (Number.isNaN(parsed.getTime())) return iso
   return parsed.toLocaleString()
+}
+
+/**
+ * One cycle's counters, in a fixed order so the same run always reads the same
+ * way — the status grid's last-run line and the cycle log share this summary.
+ * @param counters - a completed cycle's outcome (status `lastRun` or a log record).
+ * @param t - section copy.
+ * @returns the joined counters, or the no-change line.
+ */
+function runSummary(
+  counters: {
+    imported?: number
+    pushed?: number
+    archived?: number
+    deleted?: number
+    deletedUnselected?: number
+    adopted?: number
+    dropped?: number
+    cleanupDropped?: number
+    conflicts?: readonly string[]
+  },
+  t: (key: keyof typeof en, params?: Record<string, unknown>) => string,
+): string {
+  const parts: string[] = []
+  if ((counters.imported ?? 0) > 0) parts.push(t('imported', { count: counters.imported }))
+  if ((counters.pushed ?? 0) > 0) parts.push(t('pushed', { count: counters.pushed }))
+  if ((counters.archived ?? 0) > 0) parts.push(t('archived', { count: counters.archived }))
+  if ((counters.deleted ?? 0) > 0) parts.push(t('deleted', { count: counters.deleted }))
+  if ((counters.deletedUnselected ?? 0) > 0) {
+    parts.push(t('deletedUnselected', { count: counters.deletedUnselected }))
+  }
+  if ((counters.adopted ?? 0) > 0) parts.push(t('adopted', { count: counters.adopted }))
+  if ((counters.dropped ?? 0) > 0) parts.push(t('dropped', { count: counters.dropped }))
+  if ((counters.cleanupDropped ?? 0) > 0) {
+    parts.push(t('cleanupDropped', { count: counters.cleanupDropped }))
+  }
+  if ((counters.conflicts?.length ?? 0) > 0) parts.push(t('conflicts', { count: counters.conflicts!.length }))
+  return parts.length > 0 ? parts.join(' · ') : t('syncLogNoChange')
 }
 
 /** The one-line text of a cycle-log record (counters, duration, or failure). */
@@ -72,70 +120,10 @@ function logEntryText(
 ): string {
   if (entry.kind === 'start') return t('syncLogStart')
   if (entry.kind === 'failure') return t('syncLogFailure', { message: entry.error ?? '' })
-  const parts: string[] = []
-  if ((entry.imported ?? 0) > 0) parts.push(t('imported', { count: entry.imported }))
-  if ((entry.pushed ?? 0) > 0) parts.push(t('pushed', { count: entry.pushed }))
-  if ((entry.archived ?? 0) > 0) parts.push(t('archived', { count: entry.archived }))
-  if ((entry.deleted ?? 0) > 0) parts.push(t('deleted', { count: entry.deleted }))
-  if ((entry.cleanupDropped ?? 0) > 0) parts.push(t('cleanupDropped', { count: entry.cleanupDropped }))
-  if ((entry.conflicts?.length ?? 0) > 0) parts.push(t('conflicts', { count: entry.conflicts!.length }))
-  const changeText = parts.length > 0 ? parts.join(' · ') : t('syncLogNoChange')
   const duration = entry.durationMs === undefined
     ? ''
     : t('syncLogDuration', { seconds: (entry.durationMs / 1000).toFixed(1) })
-  return `${t('syncLogSuccess')} · ${changeText}${duration.length > 0 ? ` · ${duration}` : ''}`
-}
-
-/** The unmatched-workspace warning for one group (0 carriers) or its ambiguity (several). */
-function matchWarning(
-  matches: number,
-  t: (key: keyof typeof en, params?: Record<string, unknown>) => string,
-): string {
-  return matches > 1 ? t('workspaceAmbiguous') : t('workspaceUnmatched')
-}
-
-/** One session row: title, provenance, last sync, badges, and 关闭同步. */
-function SessionRow({
-  session, closing, onClose, t,
-}: {
-  session: SessionSyncSelectionSessionView
-  closing: boolean
-  onClose: (id: string) => void
-  t: (key: keyof typeof en, params?: Record<string, unknown>) => string
-}) {
-  return (
-    <li className={css.sessionRow}>
-      <div className={css.sessionMain}>
-        {/* A session the repo knows but this machine never titled falls back
-            to its id: an unnamed row would look like a rendering bug. */}
-        <span className={css.sessionTitle}>{session.title.length > 0 ? session.title : session.id}</span>
-        <span className={css.sessionMeta}>
-          {session.addedAt !== undefined && (
-            <span className={css.sessionMetaItem}>{t('sessionAddedAt', { time: displayTime(session.addedAt) })}</span>
-          )}
-          {session.addedBy !== undefined && (
-            <span className={css.sessionMetaItem}>{t('sessionAddedBy', { host: session.addedBy })}</span>
-          )}
-          {session.lastSyncAt !== undefined && (
-            <span className={css.sessionMetaItem}>
-              {session.lastSyncHost !== undefined
-                ? t('sessionLastSync', { host: session.lastSyncHost, time: displayTime(session.lastSyncAt) })
-                : t('sessionLastSyncNoHost', { time: displayTime(session.lastSyncAt) })}
-            </span>
-          )}
-        </span>
-      </div>
-      <div className={css.sessionBadges}>
-        {session.conflicts > 0 && (
-          <span className={css.badgeConflict}>{t('sessionConflict', { count: session.conflicts })}</span>
-        )}
-        {!session.present && <span className={css.badgeMuted}>{t('sessionNotPresent')}</span>}
-        {/* Closing sync is a session action against the plugin's own routes,
-            not a settings write: a read-only settings document does not gate it. */}
-        <Button disabled={closing} onClick={() => { onClose(session.id) }}>{t('closeSync')}</Button>
-      </div>
-    </li>
-  )
+  return `${t('syncLogSuccess')} · ${runSummary(entry, t)}${duration.length > 0 ? ` · ${duration}` : ''}`
 }
 
 /**
@@ -146,16 +134,18 @@ function SessionRow({
 export function SyncSection({
   controller,
   useSnapshot,
+  requestRecords,
   t,
 }: SyncSectionProps) {
   // The outlet can render before the slot's inject face lands; a partial
   // mount paints nothing (the sibling settings sections share this posture).
-  if (controller === undefined || useSnapshot === undefined || t === undefined) {
+  if (controller === undefined || useSnapshot === undefined || requestRecords === undefined || t === undefined) {
     return null
   }
   // Narrowed aliases: TS does not carry the guard's narrowing into nested
   // handler functions, and the JSX reads the same snapshot below.
   const sectionController = controller
+  const openRecords = requestRecords
   const state = useSnapshot((selection: SyncSectionState) => selection)
   const [draft, setDraft] = useState<SyncSettingsDraft | undefined>(undefined)
   const [writeError, setWriteError] = useState<string | null>(null)
@@ -164,6 +154,7 @@ export function SyncSection({
   // Validation stays quiet until the first Save attempt: a brand-new page with
   // an empty remote is not an error the user made.
   const [validated, setValidated] = useState(false)
+  const headingId = useId()
 
   useEffect(() => { void sectionController.load() }, [sectionController])
   useEffect(() => {
@@ -179,7 +170,7 @@ export function SyncSection({
         <h2 className={css.title}>{t('title')}</h2>
         {state.status === 'error'
           ? <p className={css.error}>{t('loadFailed')}: {state.error}</p>
-          : <p className={css.hint}>{t('intro')}</p>}
+          : <p className={css.intro}>{t('intro')}</p>}
       </div>
     )
   }
@@ -197,7 +188,13 @@ export function SyncSection({
   const issuesFor = (field: ValidationIssue['field']): ValidationIssue[] =>
     issues.filter(issue => issue.field === field)
   const readOnly = !state.writable
-  const selection: SessionSyncSelectionView | undefined = state.selection
+  // The manual actions read the *saved* section, not the draft: an unsaved
+  // switch or repository cannot sync anything yet, and a saved configuration
+  // must not lose its buttons merely because the user is mid-edit.
+  const configured = saved !== undefined && saved.enabled && saved.remote.trim().length > 0
+  const cleanupOn = settingsDraft.cleanup.enabled
+  const selection = state.selection
+  const sync = state.sync
 
   /** Persist the whole draft as one patch of exactly the changed fields. */
   async function save(): Promise<void> {
@@ -228,10 +225,12 @@ export function SyncSection({
     setWriteError(null)
   }
 
-  const configured = settingsDraft.enabled && settingsDraft.remote.trim().length > 0
-
   function setEnabled(enabled: boolean): void {
     setDraft({ ...settingsDraft, enabled })
+  }
+
+  function setCleanupEnabled(enabled: boolean): void {
+    setDraft({ ...settingsDraft, cleanup: { ...settingsDraft.cleanup, enabled } })
   }
 
   async function runSync(): Promise<void> {
@@ -242,7 +241,7 @@ export function SyncSection({
     await sectionController.cleanupNow()
   }
 
-  /** Close sync for one session, holding the row's button until it settles. */
+  /** Close sync for one session, holding that row's menu until it settles. */
   async function closeSync(id: string): Promise<void> {
     setClosingSession(id)
     await sectionController.closeSession(id)
@@ -252,19 +251,281 @@ export function SyncSection({
   return (
     <div className={css.section}>
       <h2 className={css.title}>{t('title')}</h2>
-      <p className={css.hint}>{t('intro')}</p>
+      <p className={css.intro}>{t('intro')}</p>
+      {readOnly && <p className={css.hint}>{t('readOnly')}</p>}
 
+      {/* ① Sync settings: the switch and everything the automatic cycle needs. */}
+      <section className={css.card} aria-labelledby={`${headingId}-basic`}>
+        <h3 className={css.cardTitle} id={`${headingId}-basic`}>{t('basicTitle')}</h3>
+        <div className={css.row}>
+          <div className={css.rowText}>
+            <div className={css.rowTitle}>{t('enabled')}</div>
+            {/* The scope is the plugin's central rule, so it sits with the switch. */}
+            <p className={css.rowDesc}>{t('scopeHint')}</p>
+          </div>
+          <div className={css.rowControl}>
+            <Switch
+              checked={settingsDraft.enabled}
+              label={t('enabled')}
+              disabled={readOnly}
+              onChange={setEnabled}
+            />
+          </div>
+        </div>
+
+        <div className={css.field}>
+          <label className={css.label} htmlFor="sync-remote">{t('remote')}</label>
+          <Input
+            id="sync-remote"
+            value={settingsDraft.remote}
+            disabled={readOnly}
+            placeholder="git@example.com:team/repo.git"
+            onChange={(event) => { setDraft({ ...settingsDraft, remote: event.target.value }) }}
+          />
+          <p className={css.hint}>{t('remoteHint')}</p>
+          {validated && issuesFor('remote').map(issue => (
+            <p className={css.fieldError} key={issue.message}>{issue.message}</p>
+          ))}
+        </div>
+
+        {/* Two narrow controls share one row: the branch text and the cadence
+            picker read as one fact ("which line, how often"), and the card's
+            other rows keep their full-width fields. */}
+        <div className={css.fieldRow}>
+          <div className={css.field}>
+            <label className={css.label} htmlFor="sync-branch">{t('branch')}</label>
+            <Input
+              id="sync-branch"
+              value={settingsDraft.branch}
+              disabled={readOnly}
+              onChange={(event) => { setDraft({ ...settingsDraft, branch: event.target.value }) }}
+            />
+            {validated && issuesFor('branch').map(issue => (
+              <p className={css.fieldError} key={issue.message}>{issue.message}</p>
+            ))}
+          </div>
+          <div className={css.field}>
+            <label className={css.label} htmlFor="sync-interval">{t('interval')}</label>
+            <select
+              id="sync-interval"
+              className={css.select}
+              value={settingsDraft.intervalMinutes}
+              disabled={readOnly}
+              onChange={(event) => { setDraft({ ...settingsDraft, intervalMinutes: Number(event.target.value) }) }}
+            >
+              {intervalOptions(settingsDraft.intervalMinutes).map(minutes => (
+                <option key={minutes} value={minutes}>{t('intervalUnit', { minutes })}</option>
+              ))}
+            </select>
+            {validated && issuesFor('interval').map(issue => (
+              <p className={css.fieldError} key={issue.message}>{issue.message}</p>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ② The shared selection, read with the sidebar tree's own anatomy. */}
+      <section className={css.card} aria-labelledby={`${headingId}-selection`}>
+        <div className={css.cardHead}>
+          <h3 className={css.cardTitle} id={`${headingId}-selection`}>{t('selectionTitle')}</h3>
+          {selection !== undefined && selection.total > 0 && (
+            <span className={css.cardMeta}>
+              {t('selectionTotal', { count: selection.total, workspaces: selection.workspaces.length })}
+            </span>
+          )}
+        </div>
+        {state.selectionError !== null && (
+          <p className={css.error}>{t('selectionFailed', { message: state.selectionError })}</p>
+        )}
+        {state.sessionError !== null && (
+          <p className={css.error}>{t('sessionActionFailed', { message: state.sessionError })}</p>
+        )}
+        {/* A selection that never loaded stays unknown: the card names the
+            failure above instead of claiming the selection is empty. */}
+        {selection === undefined
+          ? (state.selectionError === null && <p className={css.hint}>{t('selectionEmptyHint')}</p>)
+          : (
+            <SyncSelectionTree
+              selection={selection}
+              closing={closingSession}
+              onCloseSync={(id) => { void closeSync(id) }}
+              onOpenRecords={openRecords}
+              t={t}
+            />
+          )}
+      </section>
+
+      {/* ③ Git-space cleanup: its verb lives in this card's header. */}
+      <section className={css.card} aria-labelledby={`${headingId}-cleanup`}>
+        <div className={css.cardHead}>
+          <h3 className={css.cardTitle} id={`${headingId}-cleanup`}>{t('cleanupTitle')}</h3>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={readOnly || !configured || state.cleaning}
+            onClick={() => { void runCleanup() }}
+          >
+            {state.cleaning ? t('cleaning') : t('cleanupNow')}
+          </Button>
+        </div>
+        <div className={css.row}>
+          <div className={css.rowText}>
+            <div className={css.rowTitle}>{t('cleanupEnabled')}</div>
+            <p className={css.rowDesc}>{t('cleanupHint')}</p>
+          </div>
+          <div className={css.rowControl}>
+            <Switch
+              checked={cleanupOn}
+              label={t('cleanupEnabled')}
+              disabled={readOnly}
+              onChange={setCleanupEnabled}
+            />
+          </div>
+        </div>
+        {/* Disabled, not hidden: the values are still part of the draft, and a
+            control that vanished would hide what the host would apply. */}
+        <div className={css.row} data-disabled={!cleanupOn || undefined}>
+          <div className={css.rowText}>
+            <div className={css.rowTitle}>{t('cleanupPeriod')}</div>
+          </div>
+          <div className={css.rowControl}>
+            <select
+              id="sync-cleanup-period"
+              className={css.select}
+              aria-label={t('cleanupPeriod')}
+              value={settingsDraft.cleanup.periodHours}
+              disabled={readOnly || !cleanupOn}
+              onChange={(event) => {
+                setDraft({ ...settingsDraft, cleanup: { ...settingsDraft.cleanup, periodHours: Number(event.target.value) } })
+              }}
+            >
+              {cleanupPeriodOptions(settingsDraft.cleanup.periodHours).map(hours => (
+                <option key={hours} value={hours}>{t('cleanupPeriodUnit', { hours })}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div className={css.row} data-disabled={!cleanupOn || undefined}>
+          <div className={css.rowText}>
+            <div className={css.rowTitle}>
+              <label htmlFor="sync-cleanup-keep">{t('cleanupKeep')}</label>
+            </div>
+            <p className={css.rowDesc}>{t('cleanupKeepHint')}</p>
+          </div>
+          <div className={css.rowControl}>
+            <input
+              id="sync-cleanup-keep"
+              className={css.numberInput}
+              type="number"
+              min={1}
+              step={1}
+              value={settingsDraft.cleanup.keepCommits}
+              disabled={readOnly || !cleanupOn}
+              onChange={(event) => {
+                const parsed = Number(event.target.value)
+                if (!Number.isFinite(parsed) || parsed < 1) return
+                const cleanup = { ...settingsDraft.cleanup, keepCommits: Math.floor(parsed) }
+                setDraft({ ...settingsDraft, cleanup })
+              }}
+            />
+          </div>
+        </div>
+      </section>
+
+      {/* ④ Runtime status: the manual cycle and the log of what the cycles did. */}
+      <section className={css.card} aria-labelledby={`${headingId}-status`}>
+        <div className={css.cardHead}>
+          <h3 className={css.cardTitle} id={`${headingId}-status`}>{t('statusTitle')}</h3>
+          <Button
+            variant="primary"
+            size="sm"
+            disabled={readOnly || !configured || state.syncing}
+            onClick={() => { void runSync() }}
+          >
+            {state.syncing ? t('syncing') : t('syncNow')}
+          </Button>
+        </div>
+        {configured
+          ? (
+            <>
+              <dl className={css.details}>
+                <dt>{t('statusRepo')}</dt>
+                <dd>{sync?.repoReady === true ? t('repoReady') : t('repoMissing')}</dd>
+                <dt>{t('statusLastSync')}</dt>
+                <dd>{sync?.lastSyncAt !== undefined ? displayTime(sync.lastSyncAt) : t('neverSynced')}</dd>
+                <dt>{t('statusLastRun')}</dt>
+                <dd>{sync !== undefined ? runSummary(sync.lastRun, t) : t('neverSynced')}</dd>
+                {sync?.lastCleanup !== undefined && (
+                  <>
+                    <dt>{t('statusLastCleanup')}</dt>
+                    <dd>{t('lastCleanupAt', {
+                      time: displayTime(sync.lastCleanup.at),
+                      dropped: sync.lastCleanup.dropped,
+                    })}</dd>
+                  </>
+                )}
+                {sync !== undefined && sync.lastRun.conflicts.length > 0 && (
+                  <>
+                    <dt>{t('statusConflicts')}</dt>
+                    <dd>{t('conflicts', { count: sync.lastRun.conflicts.length })}</dd>
+                  </>
+                )}
+              </dl>
+              {/* Failures stay below the facts and keep their own instant, so a
+                  stale error cannot read as part of the last successful run. */}
+              {sync?.lastError !== undefined && (
+                <p className={css.error}>
+                  {sync.lastErrorAt !== undefined
+                    ? t('syncFailedAt', { time: displayTime(sync.lastErrorAt), message: sync.lastError })
+                    : t('syncFailed', { message: sync.lastError })}
+                </p>
+              )}
+              {sync?.cleanupError !== undefined && (
+                <p className={css.error}>
+                  {sync.cleanupErrorAt !== undefined
+                    ? t('cleanupFailedAt', { time: displayTime(sync.cleanupErrorAt), message: sync.cleanupError })
+                    : t('cleanupFailed', { message: sync.cleanupError })}
+                </p>
+              )}
+              {state.syncError !== null && <p className={css.error}>{t('syncFailed', { message: state.syncError })}</p>}
+            </>
+          )
+          : <p className={css.hint}>{t('notConfigured')}</p>}
+        <details className={css.disclosure}>
+          <summary className={css.logSummary}>{t('syncLogTitle')}</summary>
+          {state.logs === undefined || state.logs.length === 0
+            ? <p className={css.hint}>{t('syncLogEmpty')}</p>
+            : (
+              <ul className={css.logList}>
+                {state.logs.map((entry: SyncLogEntry, index: number) => (
+                  <li className={css.logEntry} key={index}>
+                    <span className={css.logTime}>{displayTime(entry.time)}</span>
+                    <span className={entry.kind === 'failure' ? css.logError : undefined}>{logEntryText(entry, t)}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+        </details>
+      </section>
+
+      {/* The page's primary verb, pinned to the bottom of the scrolling column
+          so it stays reachable from anywhere in a long section. */}
       {dirty && (
         <div className={css.saveBar}>
-          <span className={css.saveBarText}>{t('unsavedChanges')}</span>
+          <span className={css.saveBarText}>
+            {writeError !== null
+              ? <span className={css.error}>{t('writeFailed', { message: writeError })}</span>
+              : t('unsavedChanges')}
+          </span>
           <div className={css.saveBarActions}>
-            <Button variant="outline" disabled={saving} onClick={reset}>{t('reset')}</Button>
+            <Button variant="outline" size="sm" disabled={saving} onClick={reset}>{t('reset')}</Button>
             {/* Deliberately not disabled by `issues`: the messages that
                 explain a blocked save only appear after a Save attempt, so a
                 disabled button would be a dead end with no way to learn what
                 is wrong. */}
             <Button
               variant="primary"
+              size="sm"
               disabled={readOnly || saving}
               onClick={() => { void save() }}
             >
@@ -273,260 +534,6 @@ export function SyncSection({
           </div>
         </div>
       )}
-
-      <label className={css.row}>
-        <input
-          type="checkbox"
-          className={css.checkbox}
-          checked={settingsDraft.enabled}
-          disabled={readOnly}
-          onChange={(event) => { setEnabled(event.target.checked) }}
-        />
-        <span>{t('enabled')}</span>
-      </label>
-
-      {/* The scope is the plugin's central rule, so it sits with the switch. */}
-      <p className={css.hint}>{t('scopeHint')}</p>
-
-      <div className={css.field}>
-        <label className={css.label} htmlFor="sync-remote">{t('remote')}</label>
-        <Input
-          id="sync-remote"
-          value={settingsDraft.remote}
-          disabled={readOnly}
-          placeholder="git@example.com:team/repo.git"
-          onChange={(event) => { setDraft({ ...settingsDraft, remote: event.target.value }) }}
-        />
-        <p className={css.hint}>{t('remoteHint')}</p>
-        {validated && issuesFor('remote').map(issue => (
-          <p className={css.fieldError} key={issue.message}>{issue.message}</p>
-        ))}
-      </div>
-
-      <div className={css.field}>
-        <label className={css.label} htmlFor="sync-branch">{t('branch')}</label>
-        <Input
-          id="sync-branch"
-          value={settingsDraft.branch}
-          disabled={readOnly}
-          onChange={(event) => { setDraft({ ...settingsDraft, branch: event.target.value }) }}
-        />
-        {validated && issuesFor('branch').map(issue => (
-          <p className={css.fieldError} key={issue.message}>{issue.message}</p>
-        ))}
-      </div>
-
-      <div className={css.field}>
-        <label className={css.label} htmlFor="sync-interval">{t('interval')}</label>
-        <select
-          id="sync-interval"
-          className={css.select}
-          value={settingsDraft.intervalMinutes}
-          disabled={readOnly}
-          onChange={(event) => { setDraft({ ...settingsDraft, intervalMinutes: Number(event.target.value) }) }}
-        >
-          {intervalOptions(settingsDraft.intervalMinutes).map(minutes => (
-            <option key={minutes} value={minutes}>{t('intervalUnit', { minutes })}</option>
-          ))}
-        </select>
-      </div>
-
-      <h3 className={css.subtitle}>{t('cleanupTitle')}</h3>
-      <label className={css.row}>
-        <input
-          type="checkbox"
-          className={css.checkbox}
-          checked={settingsDraft.cleanup.enabled}
-          disabled={readOnly}
-          onChange={(event) => {
-            setDraft({ ...settingsDraft, cleanup: { ...settingsDraft.cleanup, enabled: event.target.checked } })
-          }}
-        />
-        <span>{t('cleanupEnabled')}</span>
-      </label>
-      <p className={css.hint}>{t('cleanupHint')}</p>
-      <div className={css.field}>
-        <label className={css.label} htmlFor="sync-cleanup-period">{t('cleanupPeriod')}</label>
-        <select
-          id="sync-cleanup-period"
-          className={css.select}
-          value={settingsDraft.cleanup.periodHours}
-          disabled={readOnly}
-          onChange={(event) => {
-            setDraft({ ...settingsDraft, cleanup: { ...settingsDraft.cleanup, periodHours: Number(event.target.value) } })
-          }}
-        >
-          {cleanupPeriodOptions(settingsDraft.cleanup.periodHours).map(hours => (
-            <option key={hours} value={hours}>{t('cleanupPeriodUnit', { hours })}</option>
-          ))}
-        </select>
-      </div>
-      <div className={css.field}>
-        <label className={css.label} htmlFor="sync-cleanup-keep">{t('cleanupKeep')}</label>
-        <input
-          id="sync-cleanup-keep"
-          className={css.numberInput}
-          type="number"
-          min={1}
-          step={1}
-          value={settingsDraft.cleanup.keepCommits}
-          disabled={readOnly}
-          onChange={(event) => {
-            const parsed = Number(event.target.value)
-            if (!Number.isFinite(parsed) || parsed < 1) return
-            const cleanup = { ...settingsDraft.cleanup, keepCommits: Math.floor(parsed) }
-            setDraft({ ...settingsDraft, cleanup })
-          }}
-        />
-      </div>
-      <div className={css.formActions}>
-        <Button disabled={readOnly || !configured || state.cleaning} onClick={() => { void runCleanup() }}>
-          {state.cleaning ? t('cleaning') : t('cleanupNow')}
-        </Button>
-      </div>
-
-      {/* The selection tree is read-only here by design: sessions join it from
-          the row menu, and a row's only action is leaving it. */}
-      <h3 className={css.subtitle}>{t('selectionTitle')}</h3>
-      <p className={css.hint}>{t('selectionHint')}</p>
-      {state.selectionError !== null && (
-        <p className={css.error}>{t('selectionFailed', { message: state.selectionError })}</p>
-      )}
-      {state.sessionError !== null && (
-        <p className={css.error}>{t('sessionActionFailed', { message: state.sessionError })}</p>
-      )}
-      {selection === undefined || selection.total === 0
-        ? <p className={css.hint}>{t('selectionEmpty')}</p>
-        : (
-          <div className={css.tree}>
-            <p className={css.hint}>{t('selectionTotal', { count: selection.total })}</p>
-            {selection.workspaces.map((group, index) => (
-              // A group only exists locally (this machine selected a session
-              // it has not published yet) and so carries no repo key.
-              <div className={css.workspaceGroup} key={group.key ?? `${group.name}#${index}`}>
-                <div className={css.workspaceHead}>
-                  <span className={css.workspaceName}>{group.name}</span>
-                  {!group.matched && (
-                    <span className={css.badgeWarning} role="status">{matchWarning(group.matches, t)}</span>
-                  )}
-                </div>
-                <ul className={css.sessionList}>
-                  {group.sessions.map(session => (
-                    <SessionRow
-                      key={session.id}
-                      session={session}
-                      closing={closingSession === session.id}
-                      onClose={(id) => { void closeSync(id) }}
-                      t={t}
-                    />
-                  ))}
-                </ul>
-              </div>
-            ))}
-          </div>
-        )}
-
-      {/* Read-only on purpose: the remedy is creating a same-named workspace,
-          never binding a repo workspace to a local one. */}
-      {selection !== undefined && selection.pending.length > 0 && (
-        <div className={css.pendingBlock}>
-          <h3 className={css.subtitle}>{t('pendingTitle')}</h3>
-          <p className={css.hint}>{t('pendingHint')}</p>
-          <ul className={css.pendingList}>
-            {selection.pending.map(entry => (
-              <li className={css.pendingRow} key={entry.key}>
-                <span className={css.pendingName}>{entry.name}</span>
-                <span className={css.badgeWarning} role="status">{matchWarning(entry.matches, t)}</span>
-                <span className={css.pendingCount}>{t('pendingCount', { count: entry.sessionIds.length })}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      <div className={css.statusBlock}>
-        <div className={css.statusActions}>
-          <Button disabled={readOnly || !configured || state.syncing} onClick={() => { void runSync() }}>
-            {state.syncing ? t('syncing') : t('syncNow')}
-          </Button>
-        </div>
-        {configured
-          ? (
-            <dl className={css.statusList}>
-              <dt>{state.sync?.repoReady === true ? t('repoReady') : t('repoMissing')}</dt>
-              <dd>{state.sync?.lastSyncAt !== undefined
-                ? t('lastSyncAt', { time: displayTime(state.sync.lastSyncAt) })
-                : t('neverSynced')}</dd>
-              {state.sync !== undefined && state.sync.lastRun.imported > 0 && (
-                <dd>{t('imported', { count: state.sync.lastRun.imported })}</dd>
-              )}
-              {state.sync !== undefined && state.sync.lastRun.pushed > 0 && (
-                <dd>{t('pushed', { count: state.sync.lastRun.pushed })}</dd>
-              )}
-              {state.sync !== undefined && state.sync.lastRun.archived > 0 && (
-                <dd>{t('archived', { count: state.sync.lastRun.archived })}</dd>
-              )}
-              {state.sync !== undefined && state.sync.lastRun.deletedUnselected > 0 && (
-                <dd>{t('deletedUnselected', { count: state.sync.lastRun.deletedUnselected })}</dd>
-              )}
-              {state.sync !== undefined && state.sync.lastRun.adopted > 0 && (
-                <dd>{t('adopted', { count: state.sync.lastRun.adopted })}</dd>
-              )}
-              {state.sync !== undefined && state.sync.lastRun.dropped > 0 && (
-                <dd>{t('dropped', { count: state.sync.lastRun.dropped })}</dd>
-              )}
-              {state.sync !== undefined && state.sync.lastRun.deleted > 0 && (
-                <dd>{t('deleted', { count: state.sync.lastRun.deleted })}</dd>
-              )}
-              {state.sync?.lastCleanup !== undefined && (
-                <dd>{t('lastCleanupAt', {
-                  time: displayTime(state.sync.lastCleanup.at),
-                  dropped: state.sync.lastCleanup.dropped,
-                })}</dd>
-              )}
-              {state.sync !== undefined && state.sync.lastRun.conflicts.length > 0 && (
-                <dd>{t('conflicts', { count: state.sync.lastRun.conflicts.length })}</dd>
-              )}
-              {state.sync?.lastError !== undefined && (
-                <dd className={css.error}>
-                  {state.sync.lastErrorAt !== undefined
-                    ? t('syncFailedAt', { time: displayTime(state.sync.lastErrorAt), message: state.sync.lastError })
-                    : t('syncFailed', { message: state.sync.lastError })}
-                </dd>
-              )}
-              {state.sync?.cleanupError !== undefined && (
-                <dd className={css.error}>
-                  {state.sync.cleanupErrorAt !== undefined
-                    ? t('cleanupFailedAt', { time: displayTime(state.sync.cleanupErrorAt), message: state.sync.cleanupError })
-                    : t('cleanupFailed', { message: state.sync.cleanupError })}
-                </dd>
-              )}
-            </dl>
-          )
-          : <p className={css.hint}>{t('notConfigured')}</p>}
-        {state.syncError !== null && <p className={css.error}>{t('syncFailed', { message: state.syncError })}</p>}
-        {writeError !== null && <p className={css.error}>{t('writeFailed', { message: writeError })}</p>}
-        {!dirty && writeError === null && state.writable && (
-          <p className={css.hint}>{t('savedState')}</p>
-        )}
-        {readOnly && <p className={css.hint}>{t('readOnly')}</p>}
-      </div>
-
-      <details className={css.logBlock}>
-        <summary className={css.logSummary}>{t('syncLogTitle')}</summary>
-        {state.logs === undefined || state.logs.length === 0
-          ? <p className={css.hint}>{t('syncLogEmpty')}</p>
-          : (
-            <ul className={css.logList}>
-              {state.logs.map((entry: SyncLogEntry, index: number) => (
-                <li className={css.logEntry} key={index}>
-                  <span className={css.logTime}>{displayTime(entry.time)}</span>
-                  <span className={entry.kind === 'failure' ? css.logError : undefined}>{logEntryText(entry, t)}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-      </details>
     </div>
   )
 }

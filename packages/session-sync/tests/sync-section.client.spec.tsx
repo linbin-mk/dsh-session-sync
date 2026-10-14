@@ -48,6 +48,9 @@ async function mount(options: {
     controller,
     t,
     hooks: { snapshot: controller.store },
+    // The page hands the records request to the collection rows; the dialog
+    // itself is another surface's concern.
+    requestRecords: vi.fn(),
   }
   const props: SyncSectionProps = {
     ...injected,
@@ -82,6 +85,7 @@ describe('SyncSection', () => {
     const view = render(<SyncSection
       controller={controller}
       useSnapshot={bindSnapshotSelector(controller.store)}
+      requestRecords={vi.fn()}
       t={t}
     />)
     expect(screen.getByText(t('intro'))).toBeTruthy()
@@ -93,7 +97,7 @@ describe('SyncSection', () => {
     const { form } = await mount()
     const save = () => screen.getByRole('button', { name: t('save') })
 
-    fireEvent.click(screen.getByRole('checkbox', { name: t('enabled') }))
+    fireEvent.click(screen.getByRole('switch', { name: t('enabled') }))
     fireEvent.change(screen.getByLabelText(t('remote')), { target: { value: 'git@example.com:team/repo.git' } })
     fireEvent.change(screen.getByLabelText(t('branch')), { target: { value: 'develop' } })
     fireEvent.change(screen.getByLabelText(t('interval')), { target: { value: '10' } })
@@ -127,7 +131,7 @@ describe('SyncSection', () => {
   it('keeps the cleanup controls in the draft and writes them on save', async () => {
     const mounted = await mount()
     const { form } = mounted
-    fireEvent.click(screen.getByRole('checkbox', { name: t('cleanupEnabled') }))
+    fireEvent.click(screen.getByRole('switch', { name: t('cleanupEnabled') }))
     fireEvent.change(screen.getByLabelText(t('cleanupPeriod')), { target: { value: '72' } })
     fireEvent.change(screen.getByLabelText(t('cleanupKeep')), { target: { value: '50' } })
     expect(form.writes).toHaveLength(0)
@@ -181,7 +185,10 @@ describe('SyncSection', () => {
         status: statusView({ configured: true, repoReady: true, lastSyncAt: 'garbage' }),
       }),
     })
-    expect(screen.getByText(t('lastSyncAt', { time: 'garbage' }))).toBeTruthy()
+    // The label and the instant are separate cells now, so the unparsable
+    // instant must appear verbatim beside its own label.
+    expect(screen.getByText(t('statusLastSync'))).toBeTruthy()
+    expect(screen.getByText('garbage')).toBeTruthy()
   })
 
   it('renders the v2 status view lines including counts, conflicts, and failures', async () => {
@@ -203,13 +210,16 @@ describe('SyncSection', () => {
       }),
     })
     expect(screen.getByText(t('repoReady'))).toBeTruthy()
-    expect(screen.getByText(t('imported', { count: 2 }))).toBeTruthy()
-    expect(screen.getByText(t('pushed', { count: 1 }))).toBeTruthy()
-    expect(screen.getByText(t('archived', { count: 3 }))).toBeTruthy()
-    expect(screen.getByText(t('deletedUnselected', { count: 4 }))).toBeTruthy()
-    expect(screen.getByText(t('adopted', { count: 5 }))).toBeTruthy()
-    expect(screen.getByText(t('dropped', { count: 6 }))).toBeTruthy()
-    expect(screen.getByText(t('conflicts', { count: 1 }))).toBeTruthy()
+    // The last run reads as one line, in the fixed counter order.
+    expect(screen.getByText([
+      t('imported', { count: 2 }),
+      t('pushed', { count: 1 }),
+      t('archived', { count: 3 }),
+      t('deletedUnselected', { count: 4 }),
+      t('adopted', { count: 5 }),
+      t('dropped', { count: 6 }),
+      t('conflicts', { count: 1 }),
+    ].join(' · '))).toBeTruthy()
     // The failure line names its own instant so it cannot read as part of the last successful run.
     expect(screen.getByText(t('syncFailedAt', {
       time: new Date('2026-08-16T00:05:00.000Z').toLocaleString(),
@@ -278,7 +288,7 @@ describe('SyncSection', () => {
       mounted.controller.store.update((state) => { state.writable = true })
     })
     form.writeError = 'remote is required when the plugin is enabled'
-    fireEvent.click(screen.getByRole('checkbox', { name: t('enabled') }))
+    fireEvent.click(screen.getByRole('switch', { name: t('enabled') }))
     fireEvent.click(screen.getByRole('button', { name: t('save') }))
     await waitFor(() => {
       expect(screen.getByText(t('writeFailed', { message: 'remote is required when the plugin is enabled' }))).toBeTruthy()
@@ -290,114 +300,61 @@ describe('SyncSection selection tree', () => {
   it('shows the empty state while nothing is selected', async () => {
     await mount({ settingsValue: configured, api: fakeSyncApi({ settingsValue: configured, selection: selectionView() }) })
     expect(screen.getByText(t('selectionTitle'))).toBeTruthy()
-    expect(screen.getByText(t('selectionEmpty'))).toBeTruthy()
-    expect(screen.queryByText(t('pendingTitle'))).toBeNull()
+    expect(screen.getByText(t('selectionEmptyTitle'))).toBeTruthy()
+    // An empty selection carries no counts: the card header states nothing.
+    expect(screen.queryByText(/个工作区/)).toBeNull()
   })
 
-  it('renders a matched group with its provenance, last sync, and badges', async () => {
-    await mount({
-      settingsValue: configured,
-      api: fakeSyncApi({
-        settingsValue: configured,
-        selection: selectionView({
-          workspaces: [{
-            key: 'ws-1',
-            name: 'dsh-session-sync',
-            matched: true,
-            matches: 1,
-            sessions: [
-              selectionSession({
-                id: 's1',
-                title: '置顶功能插槽点分析',
-                addedAt: '2026-09-29T09:59:00.000Z',
-                addedBy: 'machine-a',
-                lastSyncAt: '2026-09-29T10:20:00.000Z',
-                lastSyncHost: 'machine-b',
-                lastSyncDirection: 'pull',
-                lastSyncEvents: 12,
-                conflicts: 2,
-              }),
-              selectionSession({ id: 's2', title: 'only-in-repo', present: false }),
-            ],
-          }],
-          total: 2,
-        }),
-      }),
-    })
-    expect(screen.getByText(t('selectionTitle'))).toBeTruthy()
-    expect(screen.getByText(t('selectionTotal', { count: 2 }))).toBeTruthy()
-    expect(screen.getByText('dsh-session-sync')).toBeTruthy()
-    expect(screen.getByText('置顶功能插槽点分析')).toBeTruthy()
-    expect(screen.getByText(t('sessionAddedAt', { time: new Date('2026-09-29T09:59:00.000Z').toLocaleString() }))).toBeTruthy()
-    expect(screen.getByText(t('sessionAddedBy', { host: 'machine-a' }))).toBeTruthy()
-    expect(screen.getByText(t('sessionLastSync', {
-      host: 'machine-b',
-      time: new Date('2026-09-29T10:20:00.000Z').toLocaleString(),
-    }))).toBeTruthy()
-    expect(screen.getByText(t('sessionConflict', { count: 2 }))).toBeTruthy()
-    // The repo knows s2 but this machine never imported it.
-    expect(screen.getByText(t('sessionNotPresent'))).toBeTruthy()
-    // No match warning on a group a single local workspace carries.
-    expect(screen.queryByText(t('workspaceUnmatched'))).toBeNull()
-    expect(screen.getAllByRole('button', { name: t('closeSync') })).toHaveLength(2)
-  })
-
-  it('warns on a group no local workspace carries, and on an ambiguous name', async () => {
+  it('renders the collection with its count and its row facts', async () => {
     await mount({
       settingsValue: configured,
       api: fakeSyncApi({
         settingsValue: configured,
         selection: selectionView({
           workspaces: [
-            { key: 'ws-1', name: 'renamed-locally', matched: false, matches: 0, sessions: [selectionSession({ id: 's1' })] },
-            { key: 'ws-2', name: 'twice', matched: false, matches: 2, sessions: [selectionSession({ id: 's2' })] },
+            {
+              key: 'ws-1',
+              name: 'dsh-session-sync',
+              matched: true,
+              matches: 1,
+              sessions: [
+                selectionSession({
+                  id: 's1',
+                  title: '置顶功能插槽点分析',
+                  addedAt: '2026-09-29T09:59:00.000Z',
+                  addedBy: 'machine-a',
+                  lastSyncAt: '2026-09-29T10:20:00.000Z',
+                  lastSyncHost: 'machine-b',
+                  conflicts: 2,
+                }),
+                selectionSession({ id: 's2', title: 'only-in-repo', present: false }),
+              ],
+            },
+            { key: 'ws-2', name: 'AIHelper', matched: true, matches: 1, sessions: [selectionSession({ id: 's3' })] },
           ],
-          total: 2,
+          total: 3,
         }),
       }),
     })
-    expect(screen.getByText(t('workspaceUnmatched'))).toBeTruthy()
-    expect(screen.getByText(t('workspaceAmbiguous'))).toBeTruthy()
-  })
-
-  it('falls back to the session id when the repo carries no title', async () => {
-    await mount({
-      settingsValue: configured,
-      api: fakeSyncApi({
-        settingsValue: configured,
-        selection: selectionView({
-          workspaces: [{ key: 'ws-1', name: 'demo', matched: true, matches: 1, sessions: [selectionSession({ id: 's-un titled', title: '' })] }],
-          total: 1,
-        }),
+    expect(screen.getByText(t('selectionTitle'))).toBeTruthy()
+    expect(screen.getByText(t('selectionTotal', { count: 3, workspaces: 2 }))).toBeTruthy()
+    expect(screen.getByRole('button', { name: /dsh-session-sync/ })).toBeTruthy()
+    expect(screen.getByText('置顶功能插槽点分析')).toBeTruthy()
+    // The recorded facts stay reachable through the row's own tooltip.
+    expect(screen.getByTitle([
+      t('sessionAddedAt', { time: new Date('2026-09-29T09:59:00.000Z').toLocaleString() }),
+      t('sessionAddedBy', { host: 'machine-a' }),
+      t('sessionLastSync', {
+        host: 'machine-b',
+        time: new Date('2026-09-29T10:20:00.000Z').toLocaleString(),
       }),
-    })
-    expect(screen.getByText('s-un titled')).toBeTruthy()
-  })
-
-  it('renders the pending workspaces with their waiting counts and the remedy', async () => {
-    await mount({
-      settingsValue: configured,
-      api: fakeSyncApi({
-        settingsValue: configured,
-        selection: selectionView({
-          workspaces: [{
-            key: 'ws-1',
-            name: 'not-here',
-            matched: false,
-            matches: 0,
-            sessions: [selectionSession({ id: 's1', present: false }), selectionSession({ id: 's2', present: false })],
-          }],
-          pending: [{ key: 'ws-1', name: 'not-here', sessionIds: ['s1', 's2'], matches: 0 }],
-          total: 2,
-        }),
-      }),
-    })
-    expect(screen.getByText(t('pendingTitle'))).toBeTruthy()
-    expect(screen.getByText(t('pendingHint'))).toBeTruthy()
-    expect(screen.getByText(t('pendingCount', { count: 2 }))).toBeTruthy()
-    // No binding affordance exists on purpose: creating a same-named workspace
-    // is the whole remedy.
-    expect(screen.queryByRole('button', { name: /绑定|bind/i })).toBeNull()
+      t('sessionConflict', { count: 2 }),
+    ].join(' · '))).toBeTruthy()
+    expect(screen.getByRole('img', { name: t('sessionConflict', { count: 2 }) })).toBeTruthy()
+    // The repo knows s2 but this machine never imported it.
+    expect(screen.getByRole('img', { name: t('sessionNotPresent') })).toBeTruthy()
+    // No match warning on a group a single local workspace carries.
+    expect(screen.queryByText(t('workspaceUnmatched'))).toBeNull()
   })
 
   it('closes sync from a row and re-renders the answered tree', async () => {
@@ -411,11 +368,12 @@ describe('SyncSection selection tree', () => {
     expect(screen.getByText('Demo session')).toBeTruthy()
 
     api.closeSession.mockImplementation(() => Promise.resolve(after))
-    fireEvent.click(screen.getByRole('button', { name: t('closeSync') }))
+    fireEvent.click(screen.getByRole('button', { name: t('sessionMenuAria', { name: 'Demo session' }) }))
+    fireEvent.click(screen.getByRole('menuitem', { name: t('closeSync') }))
     await waitFor(() => { expect(api.closeSession).toHaveBeenCalledWith('s1') })
     // The row is gone and the page refreshes the routed selection it answered.
     await waitFor(() => { expect(screen.queryByText('Demo session')).toBeNull() })
-    expect(screen.getByText(t('selectionEmpty'))).toBeTruthy()
+    expect(screen.getByText(t('selectionEmptyTitle'))).toBeTruthy()
     expect(mounted.controller.store.getSnapshot().selection).toBe(after)
     expect(api.getSelection).toHaveBeenCalled()
   })
@@ -430,12 +388,13 @@ describe('SyncSection selection tree', () => {
       sessionError: 'unknown session',
     })
     await mount({ settingsValue: configured, api })
-    fireEvent.click(screen.getByRole('button', { name: t('closeSync') }))
+    fireEvent.click(screen.getByRole('button', { name: t('sessionMenuAria', { name: 's1' }) }))
+    fireEvent.click(screen.getByRole('menuitem', { name: t('closeSync') }))
     await waitFor(() => {
       expect(screen.getByText(t('sessionActionFailed', { message: 'unknown session' }))).toBeTruthy()
     })
     // The row stays: nothing was closed.
-    expect(screen.getByRole('button', { name: t('closeSync') })).toBeTruthy()
+    expect(screen.getByRole('button', { name: t('sessionMenuAria', { name: 's1' }) })).toBeTruthy()
   })
 
   it('reports a failed selection read without hiding the saved settings', async () => {
@@ -444,7 +403,9 @@ describe('SyncSection selection tree', () => {
       api: fakeSyncApi({ settingsValue: configured, selectionError: 'selection down' }),
     })
     expect(screen.getByText(t('selectionFailed', { message: 'selection down' }))).toBeTruthy()
-    expect(screen.getByText(t('selectionEmpty'))).toBeTruthy()
+    // An unreadable selection is not an empty one: the page never claims a
+    // selection it could not load.
+    expect(screen.queryByText(t('selectionEmptyTitle'))).toBeNull()
     // The section itself is still the host's resolved one and stays editable.
     expect(screen.getByRole('button', { name: t('syncNow') })).toBeTruthy()
   })

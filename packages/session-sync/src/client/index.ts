@@ -122,6 +122,9 @@ export function apply(ctx: ClientContext): void {
     controller,
     t,
     hooks: { snapshot: snapshotSource },
+    // The collection rows open the same records dialog the sidebar row menu
+    // raises; both answer the one request store declared above.
+    requestRecords: (sessionId, displayTitle) => { recordsRequest.set({ sessionId, displayTitle }) },
   })
 
   // The sidebar footer status dot shares the page controller and refreshes

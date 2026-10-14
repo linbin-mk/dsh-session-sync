@@ -1,6 +1,12 @@
-/* Sync settings section, in the settings-panel design language: 14/22 body,
- * 12/18 caption, 32px fields, and `border-l2` hairlines — the vocabulary
- * GeneralSection and the ModelsSection already use.
+/* Sync settings page, in the settings-panel design language: a 16/24 title over
+ * a 14/22 intro, then one settings card per subject.
+ *
+ * The card material is the shipped settings card (`--dsw-alias-settings-card-*`
+ * plus `--dsw-radius-xl`, as ModelsSection uses), rows follow the shipped
+ * settings row (title + description left, control right, a 0.5px hairline
+ * between blocks), and the status facts use the shipped details grid. Hairlines
+ * are drawn by the card between adjacent blocks, so a block can be moved
+ * without dragging a separator along with it.
  *
  * Every color resolves through a `--dsw-alias-*` token. Bare `--border` /
  * `--surface` / `--text-*` names, which nothing in this app defines, would
@@ -12,6 +18,9 @@
   flex-direction: column;
   gap: 12px;
   max-width: 720px;
+  /* The last card clears the pinned save bar: a sticky footer overlaps the
+     scrollport's end, and the primary verb must never cover the log. */
+  padding-bottom: 4px;
   color: var(--dsw-alias-label-primary);
 }
 
@@ -23,12 +32,11 @@
   color: var(--dsw-alias-label-primary);
 }
 
-.subtitle {
-  margin: 8px 0 0;
+.intro {
+  margin: 0;
   font-size: 14px;
   line-height: 22px;
-  font-weight: 500;
-  color: var(--dsw-alias-label-primary);
+  color: var(--dsw-alias-label-tertiary);
 }
 
 .hint {
@@ -45,22 +53,108 @@
   color: var(--dsw-alias-state-error-primary);
 }
 
+/* One card per subject. */
+.card {
+  display: flex;
+  flex-direction: column;
+  border: 0.5px solid var(--dsw-alias-settings-card-stroke);
+  border-radius: var(--dsw-radius-xl);
+  padding: 14px;
+  background: var(--dsw-alias-settings-card-fill);
+}
+
+.cardHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 28px;
+}
+
+.cardTitle {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-primary);
+}
+
+.cardMeta {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* Adjacent blocks inside a card are separated by a hairline; the block right
+ * after the card title opens the card and draws none. */
+.card > * + * {
+  border-top: 0.5px solid var(--dsw-alias-border-l2);
+}
+
+.card > .cardHead + * {
+  border-top: none;
+}
+
+/* Settings row: title (and its one-line explanation) left, control right. */
 .row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 14px;
-  line-height: 22px;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 12px 0;
 }
 
-.checkbox {
-  accent-color: var(--dsw-alias-brand-primary);
+.rowText {
+  min-width: 0;
+}
+
+.rowTitle {
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.rowDesc {
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.rowControl {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* A control the host is not acting on: dimmed, and (through the disabled
+ * attribute) refusing input. */
+.row[data-disabled] .rowText,
+.row[data-disabled] .rowControl {
+  opacity: 0.5;
 }
 
 .field {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  padding: 12px 0;
+}
+
+/* Two narrow controls share one line: the branch text and the cadence picker.
+ * The left column takes the remaining width, the right one is fixed so the two
+ * control boxes read as a pair. */
+.fieldRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 180px;
+  gap: 24px;
+  align-items: start;
+  padding: 12px 0;
+}
+
+.fieldRow > .field {
+  padding: 0;
 }
 
 .label {
@@ -70,213 +164,80 @@
 }
 
 .select {
+  width: 100%;
   height: 32px;
   padding: 0 8px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 8px;
-  background: var(--dsw-alias-bg-base);
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-1);
   color: var(--dsw-alias-label-primary);
+  font-family: inherit;
   font-size: 14px;
+}
+
+.select:focus {
+  outline: none;
+  border-color: var(--dsw-alias-state-business-primary);
+}
+
+.select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .numberInput {
-  width: 160px;
+  width: 120px;
   height: 32px;
   padding: 0 8px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 8px;
-  background: var(--dsw-alias-bg-base);
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-1);
   color: var(--dsw-alias-label-primary);
+  font-family: inherit;
   font-size: 14px;
 }
 
-.formActions {
-  display: flex;
-  justify-content: flex-start;
+.numberInput:focus {
+  outline: none;
+  border-color: var(--dsw-alias-state-business-primary);
 }
 
-/* Selection tree: read-only, grouped workspace → session. The group header
- * carries the match warning, each row its provenance, last sync, and badges. */
-.tree {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+.numberInput:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
-.workspaceGroup {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px 10px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 8px;
+/* Status facts: the shipped label/value grid (76px label column). */
+.details {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 6px 10px;
+  margin: 10px 0 0;
 }
 
-.workspaceHead {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.details dt {
+  font-size: 11px;
+  line-height: 17px;
+  color: var(--dsw-alias-label-tertiary);
 }
 
-.workspaceName {
-  font-size: 14px;
-  line-height: 22px;
-  font-weight: 500;
-  color: var(--dsw-alias-label-primary);
-  word-break: break-all;
-}
-
-.sessionList {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.sessionRow {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 6px 8px;
-  border-radius: 6px;
-  background: var(--dsw-alias-bg-base);
-}
-
-.sessionMain {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+.details dd {
   min-width: 0;
-}
-
-.sessionTitle {
-  font-size: 14px;
-  line-height: 22px;
-  color: var(--dsw-alias-label-primary);
-  word-break: break-all;
-}
-
-.sessionMeta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  font-size: 12px;
-  line-height: 18px;
-  color: var(--dsw-alias-label-tertiary);
-}
-
-.sessionMetaItem {
-  white-space: nowrap;
-}
-
-.sessionBadges {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-}
-
-.badgeWarning,
-.badgeConflict,
-.badgeMuted {
-  display: inline-flex;
-  align-items: center;
-  padding: 0 6px;
-  border-radius: 6px;
-  font-size: 12px;
-  line-height: 18px;
-  white-space: nowrap;
-}
-
-.badgeWarning {
-  background: var(--dsw-alias-interactive-bg-hover);
-  color: var(--dsw-alias-state-warning-primary);
-}
-
-.badgeConflict {
-  background: var(--dsw-alias-interactive-bg-hover);
-  color: var(--dsw-alias-state-error-primary);
-}
-
-.badgeMuted {
-  background: var(--dsw-alias-interactive-bg-hover);
-  color: var(--dsw-alias-label-tertiary);
-}
-
-.pendingBlock {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.pendingList {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.pendingRow {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border-radius: 6px;
-  background: var(--dsw-alias-bg-base);
-  font-size: 12px;
-  line-height: 18px;
-}
-
-.pendingName {
-  color: var(--dsw-alias-label-primary);
-  word-break: break-all;
-}
-
-.pendingCount {
-  color: var(--dsw-alias-label-tertiary);
-  white-space: nowrap;
-}
-
-.statusBlock {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 8px;
-  padding-top: 12px;
-  border-top: 1px solid var(--dsw-alias-border-l2);
-}
-
-.statusActions {
-  display: flex;
-}
-
-.statusList {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin: 0;
-}
-
-.statusList dt {
-  font-size: 12px;
-  line-height: 18px;
-  color: var(--dsw-alias-label-secondary);
-}
-
-.statusList dd {
   margin: 0;
   font-size: 12px;
   line-height: 18px;
   color: var(--dsw-alias-label-primary);
+  overflow-wrap: anywhere;
 }
 
-.logBlock {
-  margin-top: 4px;
+/* A failure line under the grid keeps its own instant. */
+.card > .error {
+  padding-top: 8px;
+}
+
+.disclosure {
+  margin-top: 10px;
+  padding-top: 10px;
 }
 
 .logSummary {
@@ -294,55 +255,29 @@
   margin: 8px 0 0;
   padding: 0;
   list-style: none;
-  max-height: 280px;
+  max-height: 240px;
   overflow-y: auto;
 }
 
 .logEntry {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  gap: 10px;
   padding: 6px 8px;
-  border-radius: 6px;
-  background: var(--dsw-alias-bg-base);
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-bg-module-platform);
   font-size: 12px;
   line-height: 18px;
   color: var(--dsw-alias-label-primary);
 }
 
 .logTime {
+  flex: none;
   color: var(--dsw-alias-label-tertiary);
 }
 
 .logError {
   color: var(--dsw-alias-state-error-primary);
-  word-break: break-all;
-}
-
-/* Draft-and-save furniture: the bar is the page's primary verb and stays
- * beside the intro so it is visible without scrolling, and each invalid field
- * carries its own message instead of one opaque write error at the bottom. */
-.saveBar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px 12px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 8px;
-  background: var(--dsw-alias-interactive-bg-hover);
-}
-
-.saveBarText {
-  font-size: 12px;
-  line-height: 18px;
-  color: var(--dsw-alias-label-secondary);
-}
-
-.saveBarActions {
-  display: flex;
-  gap: 8px;
-  flex-shrink: 0;
+  overflow-wrap: anywhere;
 }
 
 .fieldError {
@@ -350,4 +285,35 @@
   font-size: 12px;
   line-height: 18px;
   color: var(--dsw-alias-state-error-primary);
+}
+
+/* Draft-and-save furniture: the bar appears only while the draft differs from
+ * the host's section and pins itself to the bottom of the scrolling column, so
+ * a long page never hides the one control that writes. */
+.saveBar {
+  position: sticky;
+  bottom: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 0.5px solid var(--dsw-alias-settings-card-stroke);
+  border-radius: var(--dsw-radius-lg);
+  background: var(--dsw-alias-bg-layer-3);
+  box-shadow: var(--dsw-elevation-panel);
+}
+
+.saveBarText {
+  min-width: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.saveBarActions {
+  flex: none;
+  display: flex;
+  gap: 8px;
 }

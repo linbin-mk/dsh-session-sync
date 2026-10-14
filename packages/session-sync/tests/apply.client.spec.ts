@@ -126,6 +126,11 @@ describe('session-sync apply', () => {
     expect(dialogInjected.hooks.request.getSnapshot()).toEqual({ sessionId: 's1', displayTitle: 'Demo session' })
     dialogInjected.settleRequest()
     expect(dialogInjected.hooks.request.getSnapshot()).toBeNull()
+    // The settings page's collection rows raise the same request: one store,
+    // two surfaces, so a row opened from either place shows the same dialog.
+    const sectionInjected = slots.entries('settings.section')[0]!.inject!() as unknown as SyncSectionInjected
+    sectionInjected.requestRecords('s2', 'From settings')
+    expect(dialogInjected.hooks.request.getSnapshot()).toEqual({ sessionId: 's2', displayTitle: 'From settings' })
   })
 
   it('waits on the declarations when apply runs first', async () => {

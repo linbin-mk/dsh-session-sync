@@ -32,7 +32,7 @@ A third-party session-sync plugin for [DeepSeek Harness](https://github.com/deep
 - **The repository is only a transport medium.** Every cycle runs fetch → hard reset → import → export → commit → push, so git merge conflicts cannot arise. Remote-touching commands (`ls-remote`, `fetch`, `push`) retry with exponential backoff (3 attempts by default), so one transient SSH corruption no longer blanks a whole cycle.
 - **Periodic git-space cleanup.** Git never forgets deleted files: archive deletion only changes HEAD, while every historical version stays in the object store forever. The cleanup rewrites the shared history down to the newest N commits (default 200) on a period (in hours) and force-pushes (`--force-with-lease`); the truncated commits leave the repository together with their blobs. The kept commits replay so the newest tree is preserved exactly — every current file is still there — and other machines re-sync from the rewritten history on their next cycle.
 - **Sync logs keep a 3-day window.** Every cycle appends start/success/failure records (counters, conflict copies, errors, duration) to `session-sync/logs/sync-YYYY-MM-DD.jsonl` under the harness home, and reads and writes prune log files outside the 3-day window; the settings page shows the recent records in a collapsible panel. In addition, **each session** has its own sync records (`workspaces/<key>/session-<id>.records.json`, newest 20) — the source of the "machine + time" in the session-row dialog — and they travel with the repository, so you can see when another machine pulled it.
-- **Web surface included.** The settings page (master switch, SSH remote, branch, sync cadence, git-space cleanup, the synced-sessions tree, the waiting-for-a-match workspaces, Sync now/Clean now) plus the sidebar sync status dot, the session-row menu item, and the sync-log dialog. The settings page's configuration area is still **draft-and-save**: edits are written only when you press Save, Reset drops them, and validation (required, non-blank branch) is named beside the field.
+- **Web surface included.** The settings page is four cards: **Sync settings** (master switch, SSH remote, branch beside the cadence), **Synced sessions**, **Git space cleanup**, and **Sync status** (Sync now and the cycle log). Every action lives with its own subject: Clean now in the cleanup card's header, Sync now in the status card's header. The collection tree uses the sidebar session tree's own anatomy — workspace rows (folder glyph, yielding to the expand arrow on hover, foldable) and 32px session rows (a status dot: red for a conflict, grey for not-held; a trailing relative last-sync time that the row's "..." menu replaces on hover — View sync records / Close sync). Sessions the repository holds while this machine has no same-named workspace stay inside the tree as **a warned group** instead of a separate list: its header names the situation and its waiting count, and one line under it states the remedy. The configuration area is still **draft-and-save**: a save bar rises from the bottom while the draft differs, edits are written only when you press Save, Reset drops them, validation (required, non-blank branch) is named beside the field, and a refused write reports in that same bar. Plus the sidebar sync status dot, the session-row menu item, and the sync-log dialog.
 
 ## Why this plugin needs no harness core patches
 
@@ -57,7 +57,7 @@ The UI itself also rides entirely on the harness's open slots — nothing needs 
 
 | Slot | id | Content |
 |---|---|---|
-| `settings.section` | `sync` | Sync settings page |
+| `settings.section` | `sync` | Sync settings page (four cards, pinned save bar, collection tree) |
 | `sidebar.footer.action` | `session-sync-status` | Sidebar status dot |
 | `sidebar.workspaces.session.menu.item` | `session-sync.toggle` | Session row `...` menu item (order 500) |
 | `shell.overlay` | `session-sync.dialog` | Sync-log dialog |
@@ -176,7 +176,7 @@ Configuration is the Cordis Config of the `session-sync` profile row: every user
 | `intervalMinutes` | Automatic sync cadence in minutes (minimum 1, default 5). |
 | `cleanup` | `{ enabled, periodHours, keepCommits }`: the periodic git-space cleanup switch, the period between cleanups (hours, minimum 1, default 24), and the number of newest commits to keep (minimum 1, default 200). |
 
-**The sync set is not a configuration field** — it is data: the settings page displays it read-only, and the only write entry points are the session row menu (plus "Close sync" at the end of a settings-page row).
+**The sync set is not a configuration field** — it is data: the settings page displays it read-only, and the only write entry points are the session row menu (plus "Close sync" in the "..." menu of a settings-page collection row).
 
 Timing: one automatic cycle `startupSyncDelayMs` after startup, then every `intervalMinutes`. **Clicking "Sync session" fires a cycle immediately** (single-flight guard), so this machine is instant, while when the other side sees it depends on that side's `intervalMinutes`. Cleanup checks for expiry once after each successful cycle, plus the settings page's Clean now button.
 
