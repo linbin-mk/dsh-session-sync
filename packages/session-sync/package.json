@@ -1,6 +1,6 @@
 {
   "name": "@linbin-mk/dsh-session-sync",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "Session-sync plugin for DeepSeek Harness: git-backed cross-machine session sync with its own web settings surface, row-menu action, and sync-records dialog",
   "license": "MIT",
   "author": "linbin-mk (https://github.com/linbin-mk)",
