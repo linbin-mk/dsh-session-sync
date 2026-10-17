@@ -9,3 +9,6 @@ coverage/
 # Throwaway DSH_HOME used to smoke-test a packed artifact without touching a
 # real profile (see the README's install section).
 .dsh-verify/
+# Local-only release evidence: the Chinese release-notes draft and captured
+# verification output. The published GitHub Release body is the outward record.
+.e2e/

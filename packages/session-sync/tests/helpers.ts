@@ -160,8 +160,6 @@ export interface FakeConfigFormOptions<T = Record<string, unknown>> {
   value?: T
   /** Whether the Host document accepts writes; defaults to the section's presence. */
   writable?: boolean
-  /** `host` syncs with the Host document; `memory` keeps the page process-local. */
-  mode?: 'host' | 'memory'
 }
 
 /** Lay one path op over a section the way the Host document merges it. */
@@ -195,14 +193,14 @@ export class FakeConfigForm<T = Record<string, unknown>> implements ConfigForm<T
   reads = 0
   /** Message the next write rejects with; consumed by that write. */
   writeError: string | undefined
-  /** Whether writes are skipped, as a process-local page's form does. */
+  /** Whether writes are skipped, as a page whose form was disposed does. */
   skipWrites = false
   /** Whether the Host refuses writes, as its validators do (the form reports `false`). */
   refuseWrites = false
   private snapshot: ConfigFormSnapshot<T>
   private readonly listeners = new Set<() => void>()
 
-  /** @param options - served section, writability, and persistence mode. */
+  /** @param options - served section and its writability. */
   constructor(options: FakeConfigFormOptions<T> = {}) {
     this.snapshot = {
       status: options.value === undefined ? 'unavailable' : 'ready',
@@ -210,8 +208,7 @@ export class FakeConfigForm<T = Record<string, unknown>> implements ConfigForm<T
       base: undefined,
       user: undefined,
       revision: options.value === undefined ? undefined : 1,
-      writable: (options.mode ?? 'host') === 'memory' ? false : options.writable ?? true,
-      mode: options.mode ?? 'host',
+      writable: options.writable ?? true,
     }
   }
 
@@ -241,7 +238,7 @@ export class FakeConfigForm<T = Record<string, unknown>> implements ConfigForm<T
       this.writeError = undefined
       throw new Error(message)
     }
-    if (this.refuseWrites || this.skipWrites || this.snapshot.mode === 'memory') return false
+    if (this.refuseWrites || this.skipWrites) return false
     this.writes.push([...ops])
     let next = this.snapshot.value as Record<string, unknown> | undefined
     for (const op of ops) next = applyOp(next, op)

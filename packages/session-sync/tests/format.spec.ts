@@ -252,6 +252,24 @@ describe('parsePortableSession', () => {
     expect(parsed.events).toHaveLength(2)
     expect(parsed.events[0]).toMatchObject({ type: 'working-directory/change', seq: 0 })
   })
+
+  it('accepts the job lifecycle events the 0.2.1-rc.2 peer added', () => {
+    // `job/registered` and `job/settled` enter the harness vocabulary in
+    // 0.2.1-rc.2 (background job lifecycle timing persisted in the session
+    // log). The parser gates on the `dsh-session` peer's own
+    // KNOWN_SESSION_EVENT_TYPES, so tracking rc.2 is what makes a session that
+    // started or settled a job syncable; on the alpha.2 peer these rows would
+    // be rejected as unknown *required* types and the whole artifact refused.
+    const rows = [
+      JSON.stringify({ type: 'job/registered', seq: 0, time: 1, data: { jobId: 'job-1', startedAt: 1 } }),
+      JSON.stringify({ type: 'job/settled', seq: 1, time: 2, data: { jobId: 'job-1', startedAt: 1, finishedAt: 2 } }),
+      eventRow(2, 3),
+    ]
+    const parsed = parsePortableSession(artifact(headerLine(), rows), '/local/demo')
+
+    expect(parsed.events.map(event => event.type)).toEqual(['job/registered', 'job/settled', 'turn/start'])
+    expect(parsed.events[1]).toMatchObject({ type: 'job/settled', seq: 1 })
+  })
 })
 
 describe('repo path helpers', () => {

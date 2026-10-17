@@ -57,6 +57,12 @@ describe('published tarball', () => {
     expect(packed.has('lib/client.js')).toBe(true)
     expect(packed.has('lib/index.js')).toBe(true)
     expect(packed.has('cordis.patch.yml')).toBe(true)
+    // Display metadata the Plugin Manager and Settings inventory read through
+    // package exports: both must ride the tarball, or the plugin row silently
+    // falls back to package-name text and generic artwork.
+    expect(packed.has('icon.svg')).toBe(true)
+    expect(packed.has('locale/en.json')).toBe(true)
+    expect(packed.has('locale/zh.json')).toBe(true)
 
     // Walk from the Host entry: every module it reaches, directly or through
     // another module, must be in the tarball.

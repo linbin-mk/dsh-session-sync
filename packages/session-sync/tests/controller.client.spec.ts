@@ -81,14 +81,32 @@ describe('SyncSectionController.load', () => {
     expect(api.getSettings).toHaveBeenCalled()
   })
 
-  it('keeps a process-local page read-only even when the route reports writable', async () => {
-    const api = fakeSyncApi({ status: statusView({ configured: true }) })
-    const controller = bench(api, new FakeConfigForm<SyncSettingsDraft>({ mode: 'memory' }))
+  it('trusts the plugin route\'s read-only posture while the form serves nothing', async () => {
+    const api = fakeSyncApi({
+      status: statusView({ configured: true }),
+      writable: false,
+      settingsValue: { enabled: true, remote: 'git@example.com:team/repo.git', branch: 'main', intervalMinutes: 5 },
+    })
+    const controller = bench(api)
     await controller.load()
 
     expect(controller.store.getSnapshot().status).toBe('ready')
     expect(controller.store.getSnapshot().settings).toBeDefined()
     expect(controller.store.getSnapshot().writable).toBe(false)
+  })
+
+  it('edits through a ready writable form snapshot that carries no persistence mode', async () => {
+    // Harness 0.2.1-alpha.3 removed ConfigFormSnapshot.mode: an authenticated
+    // browser always persists on the Host document, so a ready, writable form
+    // is the editable posture regardless of the browser's origin.
+    const api = fakeSyncApi()
+    const form = new FakeConfigForm<SyncSettingsDraft>({ value: { ...baseSettingsValue } })
+    const controller = bench(api, form)
+    await controller.load()
+
+    expect(controller.store.getSnapshot().writable).toBe(true)
+    expect(await controller.update({ intervalMinutes: 30 })).toBeUndefined()
+    expect(form.writes).toHaveLength(1)
   })
 
   it('keeps a page read-only while the form reports the Host document unwritable', async () => {

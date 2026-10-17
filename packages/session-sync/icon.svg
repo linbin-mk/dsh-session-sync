@@ -1,0 +1,15 @@
+<!--
+  Plugin icon: original artwork for this plugin — two circular arrows in the
+  DeepSeek blue, standing for sessions exchanged between machines. No
+  third-party asset is reproduced here. The Harness Plugin Manager and the
+  Settings plugin inventory read it through the "./icon" export without
+  activating the plugin.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="Session sync">
+  <g fill="#4176e6">
+    <path d="M8.55 11.7A8.6 8.6 0 0 1 23.45 11.7" fill="none" stroke="#4176e6" stroke-width="2.6" stroke-linecap="round"/>
+    <path d="M25.55 15.34 21.95 13.49 25.75 11.29Z"/>
+    <path d="M23.45 20.3A8.6 8.6 0 0 1 8.55 20.3" fill="none" stroke="#4176e6" stroke-width="2.6" stroke-linecap="round"/>
+    <path d="M6.45 16.66 10.06 18.51 6.25 20.71Z"/>
+  </g>
+</svg>

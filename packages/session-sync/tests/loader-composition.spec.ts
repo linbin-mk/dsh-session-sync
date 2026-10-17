@@ -10,7 +10,9 @@ import * as StorageJson from '@deepseek-ai/dsh-storage-json'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+// Harness 0.2.1-rc.2's jsonl backend exports `name`/`Config`/`apply` instead of a
+// default export, so the builtin is mounted from its module namespace object.
+import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SessionProjectionCache from '@deepseek-ai/dsh-session-projection-cache'

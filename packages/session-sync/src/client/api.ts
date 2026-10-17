@@ -8,10 +8,11 @@
  * The settings section itself rides the shared configuration form of the
  * `session-sync` Host entry (reads, pushed updates, revision-fenced writes).
  * This client still serves two settings cases the form does not: `getSettings`
- * for a page the Host keeps process-local (`mode: 'memory'`), which displays
- * the resolved section read-only, and `updateSettings` as the only path that
- * answers the Host's refusal message — the shared form reports a refusal as a
- * plain `false` and drops the reason.
+ * for a page whose form has no live Host document yet (loading, unavailable,
+ * or disposed), which shows the resolved section with the route's own writable
+ * posture, and `updateSettings` as the only path that answers the Host's
+ * refusal message — the shared form reports a refusal as a plain `false` and
+ * drops the reason.
  *
  * The selection tree, the per-session records, and the two session mutations
  * are the v2 additions: `sync.json`'s selection is what the row menu and the

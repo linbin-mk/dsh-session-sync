@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Session Sync",
+    "description": "Git-backed cross-machine session sync for DeepSeek Harness: manage the sync selection, git remote, branch and cadence on the settings page, enable syncing per session from the session row menu, and inspect each session's sync records."
+  }
+}

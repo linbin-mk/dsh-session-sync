@@ -5,10 +5,11 @@
  * section comes from the shared configuration form of the `session-sync`
  * profile entry, every field edit is one revision-fenced form write, and
  * status, the selection, the per-session records, and the cycle log ride the
- * plugin's own same-origin HTTP API. A page the Host keeps process-local
- * (`mode: 'memory'`) reads the resolved section from that API but never
- * writes. Shape checks stay light here: the Host re-validates every write,
- * and this page's inputs come from the same schema the Host owns.
+ * plugin's own same-origin HTTP API. A page whose form has no live Host
+ * document (loading, unavailable, or disposed) reads the resolved section
+ * from that API and trusts its `writable` flag instead. Shape checks stay
+ * light here: the Host re-validates every write, and this page's inputs come
+ * from the same schema the Host owns.
  *
  * The selection is the v2 currency: the settings page renders it as the
  * workspace → session tree, and the session row's "..." menu reads a derived
@@ -164,17 +165,19 @@ export function menuStateOf(state: SyncSectionState): SyncMenuState {
 }
 
 /**
- * Whether the page may persist an edit. The Host must accept writes AND serve
- * the section to this client: a page the Host keeps process-local
- * (`mode: 'memory'`, a non-loopback browser) never writes, whatever the
- * plugin's own route reports.
+ * Whether the page may persist an edit. A ready form owns the answer through
+ * its `writable` flag; before one stands (still loading, unavailable, or
+ * disposed) the plugin's own settings view decides. Harness 0.2.1-alpha.3
+ * removed the form snapshot's `mode` field: an authenticated browser always
+ * persists on the Host document, so a ready, writable form is the only
+ * editable posture and no process-local fallback can serve a read-only page
+ * that the form itself calls writable.
  * @param snapshot - the shared configuration form's current snapshot.
  * @param routeWritable - the plugin's own settings view writable flag, used
  * until the form has an answer of its own.
  * @returns whether write controls are live.
  */
 function writableFrom(snapshot: ConfigFormSnapshot<SyncSettingsDraft>, routeWritable: boolean): boolean {
-  if (snapshot.mode !== 'host') return false
   return snapshot.status === 'ready' ? snapshot.writable : routeWritable
 }
 
@@ -246,9 +249,9 @@ export class SyncSectionController {
     let writable = writableFrom(snapshot, true)
     let settings = snapshot.status === 'ready' ? decodeSettings(snapshot.value) : undefined
     if (settings === undefined) {
-      // The form has no section for this client yet (loading, or a
-      // process-local page): the plugin's own route still serves the resolved
-      // section read-only.
+      // The form has no section for this client yet (loading, unavailable,
+      // or disposed): the plugin's own route still serves the resolved
+      // section, with that view's own writable posture.
       let view: { writable: boolean; settings: unknown }
       try {
         view = await this.api.getSettings()
@@ -461,7 +464,7 @@ export class SyncSectionController {
     }
     // The reload serves what the Host actually holds: the committed section
     // after an accepted write, and the persisted section plus its read-only
-    // posture after a skipped one (a process-local page, or a disposed form).
+    // posture after a skipped one (a disposed form, or a write the Host kept).
     await this.load()
     return undefined
   }
@@ -469,7 +472,7 @@ export class SyncSectionController {
   /** Whether a live, writable Host-served form owns this page's writes. */
   private hostServed(): boolean {
     const snapshot = this.form.getSnapshot()
-    return snapshot.status === 'ready' && snapshot.writable && snapshot.mode === 'host'
+    return snapshot.status === 'ready' && snapshot.writable
   }
 
   /**
