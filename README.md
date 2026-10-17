@@ -32,6 +32,7 @@
 - **仓库只是传输介质。** 每个周期执行 fetch → 硬重置 → 导入 → 导出 → 提交 → 推送，git 合并冲突无从产生。远程命令（`ls-remote`、`fetch`、`push`）自带指数退避重试（默认最多 3 次尝试），一次瞬时的 SSH 连接损坏不再让整个周期报废。
 - **定期清理 git 空间。** git 不会遗忘已删除的文件：归档删除只影响 HEAD，历史里的每个旧版本永远留在对象库里。清理功能按周期（小时）把共享历史重写到只保留最近 N 次提交（默认 200）并强推（`--force-with-lease`），被截断的提交连同它们的 blob 一起退出仓库；重放保留提交时最新树原样保留——当前所有文件一个不少，其他电脑在下一个周期自动按重写后的历史重新同步。
 - **同步日志保留 3 天。** 每个周期在 harness home 的 `session-sync/logs/sync-YYYY-MM-DD.jsonl` 里追加开始/成功/失败记录（含计数、冲突副本、错误与耗时），读写时自动清理超出 3 天窗口的日志文件；设置页的折叠面板展示最近记录。另外，**每个会话**有一份自己的同步记录（`workspaces/<key>/session-<id>.records.json`，保留最近 20 条），那是行菜单弹窗里显示的「机器 + 时间」来源，会随仓库传播，所以你能看到另一台机器什么时候拉过它。
+- **插件清单里显示本地化名称与图标。** 包内 `icon.svg`（两枚循环箭头的原创图形）与 `locale/en.json`、`locale/zh.json`（各自带 `meta.title` / `meta.description`）经 `./icon`、`./locale/*.json` 导出，harness 的 Plugin Manager、bundle 详情与设置页插件清单在**不激活插件**的情况下就能显示「会话同步 / Session Sync」的标题、描述和图标。
 - **自带 Web 界面。** 设置页分成四张卡片：**同步设置**（总开关、SSH 仓库地址、分支与间隔同行）、**同步会话集合**、**Git 空间清理**、**同步状态**（立即同步与同步日志）。每个动作都待在它作用的对象上：「立即清理」在清理卡片的标题行，「立即同步」在状态卡片的标题行。集合树与侧栏会话树同一套行结构：工作区行（文件夹图标，hover 让位给展开箭头，可折叠）、32px 会话行（状态点：冲突红点、未同步到本机灰点；尾部是「最近同步」的相对时间，hover 换成「…」菜单——查看同步记录 / 关闭同步）。仓库里有、本机却没有同名工作区的会话不再另起一块，而是作为**带告警的分组**留在树里，组头写明「没有同名工作区」与等待数量，组下一行说明补救方式。设置区仍是**草稿 + 显式保存**：改动后页面底部浮出保存条，点「保存」才写入，「撤销修改」丢弃改动，校验（必填、分支非空）就地提示；写失败也显示在保存条里。另有侧栏同步状态点、会话行菜单项、同步日志弹窗。
 
 ## 为什么这个插件不需要改 harness 核心代码
@@ -51,7 +52,7 @@ harness 的 RPC 表（`apiproxy`）是编译器锁死的静态注册表——第
 | `/session-sync/settings` | POST | 合并一个 patch 到设置段（host 校验） |
 | `/session-sync/logs` | GET | 最近同步日志（保留窗口内，新的在前，`?limit=` 上限 500） |
 
-浏览器端用普通 `fetch` 调用这些路由。写路由拒绝跨源请求（`Origin` 头必须指向本服务器自身 host）和畸形请求体。设置段的读写走 harness 通用的 config form（`ctx.configForms`，入口 id 就是 profile 里的 `session-sync` 行），插件自己的设置路由仍保留两个用途：`GET` 供 Host 把偏好保留在浏览器进程内的页面（非 loopback 页面，`mode: 'memory'`）只读展示配置，`POST` 是唯一带回 host 拒绝原因的写入路径。
+浏览器端用普通 `fetch` 调用这些路由。写路由拒绝跨源请求（`Origin` 头必须指向本服务器自身 host）和畸形请求体。设置段的读写走 harness 通用的 config form（`ctx.configForms`，入口 id 就是 profile 里的 `session-sync` 行）；插件自己的设置路由保留两个用途：`GET` 供共享表单还没有活的 Host 文档时（加载中、不可用或已销毁）按该路由自己的 `writable` 展示配置，`POST` 是唯一带回 host 拒绝原因的写入路径。
 
 界面本身也全部走 harness 开放的插槽，没有一处需要改核心：
 
@@ -97,10 +98,20 @@ logs/            周期日志
 ## 环境要求
 
 - Node.js `^22.19 || >=24`
-- DeepSeek Harness `0.2.1-alpha.2`（所有 `@deepseek-ai/*` 依赖均使用 npm 发布版本，不含本机 harness 链接）
-- 两个包声明的 peer 线：`@deepseek-ai/cordis ^4.0.5-alpha.1`、`@deepseek-ai/schemastery ^3.18.5-alpha.1`、`cordis-plugin-loader ^1.0.6-alpha.1`、`cordis-plugin-include ^1.0.10-alpha.1`
+- DeepSeek Harness `0.2.1-rc.2`（所有 `@deepseek-ai/*` 依赖均使用 npm 发布版本，不含本机 harness 链接）
+- 包声明的 peer 线：`@deepseek-ai/cordis ^4.0.5`、`@deepseek-ai/schemastery ^3.18.5`、`cordis-plugin-loader ^1.0.6`、`cordis-plugin-include ^1.0.10`
 - PATH 中有 `git`，且同步远端需要 SSH key（host key 策略：`StrictHostKeyChecking=accept-new`）
 - 只有从源码构建时才需要 pnpm
+
+### 0.9.0 破坏性变更：跟随 harness `0.2.1-rc.2`
+
+- **设置页「能不能写」的判据换了，不再看进程内/宿主二选一。** harness 0.2.1-alpha.3（提交 `23c29d067a`，`fix(web): persist authenticated browser preferences on the Host`）从客户端 config form 的快照里去掉了 `mode` 字段：认证过的浏览器一律把偏好持久化到 Host 文档。0.8.1 仍要求 `snapshot.mode === 'host'` 才允许编辑，于是**在 0.2.1-rc.2 上插件能加载、设置页也画得出来，但所有写入控件都渲染成禁用**，页面只有一条「当前部署的设置文档为只读」提示——没有报错，只是任何配置都保存不了。0.9.0 改为在共享表单就绪时只看 `status === 'ready' && writable`（表单还没有活的 Host 文档时才回落到插件设置路由的 `writable`），并删除 memory 模式分支；`tests/controller.client.spec.ts` 用不带 `mode` 的 ready + writable 快照、以及共享表单不提供 Host 文档时的只读路由页面各钉一条回归。
+
+- **peer 线与 `engines.dsh` 下限一起抬到 `^0.2.1-rc.2`。** 在 0.2.1-rc.2 上，兼容闸门 `evaluatePluginCompatibility()` 的规则是：插件只要声明了 `engines.dsh`，就**只按它**判定，`@deepseek-ai/dsh-*` peer 不再参与——所以这条声明的下限是真正的门，而不是 0.7.0 一节当时写的纯声明性字段（那时 alpha.2 确实只校验 peer）。本版本声明 `engines.dsh: ^0.2.1-rc.2`，仍停在 `0.2.1-alpha.2` / `rc.1` 的 profile 会在安装时被拒、或在组合期被禁用。`cordis ^4.0.5`、`schemastery ^3.18.5`、`cordis-plugin-loader ^1.0.6`、`cordis-plugin-include ^1.0.10` 随之去掉 `-alpha.1` 后缀。
+
+- **会话事件表新增两种 job 事件，导入侧跟着放开。** 0.2.1-rc.2 的 `KNOWN_SESSION_EVENT_TYPES` 新增 `job/registered` 与 `job/settled`（后台任务的生命周期时间线）。工件导入照 `dsh-session` 这份表校验必需事件类型，所以启动或结束过后台任务的会话在旧 peer 上会被判「未知的必需事件类型」而整份拒绝导入；跟随 rc.2 的 peer 后自然接受，`tests/format.spec.ts` 加了回归用例。
+
+- **插件清单里有了显示元数据。** 包内新增 `icon.svg` 与 `locale/en.json` / `locale/zh.json`，经 `./icon` 与 `./locale/*.json` 导出；harness 的 Plugin Manager、bundle 详情和设置页插件清单会按包名解析这些资源，**不需要激活插件**就能显示本地化标题、描述与图标。资源缺失时 harness 会静默回落到包名与通用占位图，所以 `tests/display-metadata.spec.ts` 按它的解析规则钉住了导出、语言 id、图标格式与 `files` 白名单。
 
 ### 0.7.0 破坏性变更：跟随 harness `0.2.1-alpha.2`
 
@@ -108,7 +119,7 @@ logs/            周期日志
 
   harness 现在会在组合期逐个插件校验 `@deepseek-ai/dsh-*` peer：`evaluatePluginCompatibility()` 拿运行时的 dsh 版本做 `semver.satisfies(runtime, range, { includePrerelease: true })`，不满足就把该行标成 `disabled` 并在 stderr 打一行 `disabling profile plugin …`。而 `0.x` 的 caret 不跨次版本，预发布版本还额外要求 `major.minor.patch` 完全一致——`^0.1.7-rc.2` 匹配不到 `0.2.1-alpha.2`，所以**旧 peer 线会让 `session-sync` 这一行在 harness 0.2.1 上被整个禁用**：不是降级、不是警告，是根本不加载。抬到 `^0.2.1-alpha.2` 后校验通过（`includePrerelease: true` 下同样为真）。
 
-  包同时新增 `engines.dsh: ^0.2.1-alpha.2`，把兼容下限记在 harness 自己的 `DshEnginesManifest` 位置上。该字段目前是**声明性**的——没有任何读取方强制它，上面那道 peer 校验才是真正的闸门。
+  包同时新增 `engines.dsh: ^0.2.1-alpha.2`，把兼容下限记在 harness 自己的 `DshEnginesManifest` 位置上。该字段在 `0.2.1-alpha.2` 上确实是**声明性**的——没有任何读取方强制它，上面那道 peer 校验才是真正的闸门；**`0.2.1-rc.2` 起这一说法已不成立**，声明了 `engines.dsh` 时闸门只按它判定，见上方 0.9.0 一节。
 - **顺带修掉一类导入失败。** harness 0.2.1 给会话事件表加了 `working-directory/change`（事件类型总数 60），而工件导入是照 `dsh-session` 自己那份 `KNOWN_SESSION_EVENT_TYPES` 校验的（`src/format.ts:385`，只作用于导入侧）。仍用旧 peer 时，日志里含这个事件的会话会在**导入**时被判成「未知的必需事件类型」而拒绝——切换过工作目录的会话就落不到另一台机器上。换到新 peer 后自然接受，`tests/format.spec.ts` 加了回归测试钉住。
 - `@deepseek-ai/dsh-invariants` 已在 0.2.x 被 harness 删除，`pnpm-workspace.yaml` 的 release-age 豁免表里那条随之清掉；插件从未 import 它，仅是过期条目。
 

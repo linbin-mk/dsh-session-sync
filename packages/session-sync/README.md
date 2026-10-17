@@ -14,6 +14,7 @@ dsh-session-sync 插件的 host 半边：DeepSeek Harness 的 git 后端自动�
 - 选择树投影（`buildSelectionView`、`SelectionTreeInput`）：设置页「同步会话集合」的分组规则，纯函数。
 - 切换提醒（`SWITCH_NOTICE_TEXT`、`createSwitchNoticeMessage`、`withSwitchNotice`）：为「切换电脑后首次续聊」注入一次本包自有 source kind 的 `notice` 消息。
 - HTTP 面（`registerSessionSyncRoutes`、路由常量、`parseSessionRoute`、wire 类型），挂载 `webServer` 时注册到 harness 的开放路由缝。
+- 展示元数据：`icon.svg`（两枚循环箭头的原创图形，无第三方素材）与 `locale/en.json` / `locale/zh.json`（各带 `meta.title` / `meta.description`），经 `./icon` 与 `./locale/*.json` 导出。harness 的 Plugin Manager、bundle 详情与设置页插件清单按包名直接解析这些资源，**不激活插件**就能显示本地化标题、描述与图标。
 
 浏览器半边**在同一个包里**：`exports["./client"]` 是 Web 客户端加载的 bundle（`lib/client.js`），由 `dsh.client` 声明。合并前它是独立的 `@linbin-mk/dsh-client-ui-settings-sync`，v0.6.0 起并入本包，那个包不再发布新版本——升级时记得先把旧行 `dsh plugin --profile <name> remove @linbin-mk/dsh-client-ui-settings-sync` 摘掉。
 
@@ -26,7 +27,7 @@ dsh-session-sync 插件的 host 半边：DeepSeek Harness 的 git 后端自动�
     startupSyncDelayMs: 3000
 ```
 
-`config` 里的 `startupSyncDelayMs` 是部署项；`enabled`、`remote`、`branch`、`intervalMinutes`、`cleanup` 是设置页可写的活字段，写入由 harness 的 settings 服务落到 profile patch 文档。要求 DeepSeek Harness `0.2.1-alpha.2`（peer：`@deepseek-ai/cordis ^4.0.5-alpha.1`、`@deepseek-ai/schemastery ^3.18.5-alpha.1`、`cordis-plugin-loader ^1.0.6-alpha.1`、`cordis-plugin-include ^1.0.10-alpha.1`）。要求 `settings` 与 `sessionPersistence` 服务；`workspaceRegistry` 是落位能力（按名匹配、按 cwd 反查、归档标记应用都要它，缺少时导出与导入都会被跳过并报告）；`sessionProjectionCache` 可选（导入后预热；设置页也用它零 I/O 读标题）。`webServer` 同样可选——没有它时插件以 headless 运行，只是不提供 Web 路由。切换提醒监听 harness 的 `agent/pre-step` 事件（`dsh-agent`/`dsh-llm` 依赖）：没有 agent 服务的部署只是永远不会触发注入。
+`config` 里的 `startupSyncDelayMs` 是部署项；`enabled`、`remote`、`branch`、`intervalMinutes`、`cleanup` 是设置页可写的活字段，写入由 harness 的 settings 服务落到 profile patch 文档。要求 DeepSeek Harness `0.2.1-rc.2`（peer：`@deepseek-ai/cordis ^4.0.5`、`@deepseek-ai/schemastery ^3.18.5`、`cordis-plugin-loader ^1.0.6`、`cordis-plugin-include ^1.0.10`）。要求 `settings` 与 `sessionPersistence` 服务；`workspaceRegistry` 是落位能力（按名匹配、按 cwd 反查、归档标记应用都要它，缺少时导出与导入都会被跳过并报告）；`sessionProjectionCache` 可选（导入后预热；设置页也用它零 I/O 读标题）。`webServer` 同样可选——没有它时插件以 headless 运行，只是不提供 Web 路由。切换提醒监听 harness 的 `agent/pre-step` 事件（`dsh-agent`/`dsh-llm` 依赖）：没有 agent 服务的部署只是永远不会触发注入。
 
 ## 仓库格式 v2
 
@@ -60,7 +61,7 @@ conflicts/<key>/<session-id>-<host>.jsonl
 | `/session-sync/sessions/<id>/records` | GET | 该会话的同步记录（机器 + 时间，新的在前） |
 | `/session-sync/sync-now` | POST | 执行一个周期并返回最新状态 |
 | `/session-sync/cleanup-now` | POST | 执行一次 git 空间清理并返回最新状态 |
-| `/session-sync/settings` | GET | `{ writable, settings }`（供 memory 模式的页面只读展示） |
+| `/session-sync/settings` | GET | `{ writable, settings }`（共享表单还没有活的 Host 文档时，按该路由的 `writable` 展示） |
 | `/session-sync/settings` | POST | 合并 patch（host 校验，返回 `{ ok: true }` 或 `400 { error }`） |
 | `/session-sync/logs` | GET | 最近同步日志 |
 
@@ -74,7 +75,9 @@ conflicts/<key>/<session-id>-<host>.jsonl
 
 `src/client/` 是 Web 客户端那一半：设置页（`settings.section` id `sync`，四张卡片 + 吸底保存条，集合树在 `SyncSelectionTree.tsx`）、侧栏状态点（`sidebar.footer.action` id `session-sync-status`）、会话行菜单项（`sidebar.workspaces.session.menu.item` id `session-sync.toggle`，order 500）与同步记录弹窗（`shell.overlay` id `session-sync.dialog`）。集合树刻意复刻侧栏会话树的行结构（34px 工作区行、32px 会话行、16px leading 槽、尾部相对时间换成「…」菜单），用的也是同一批 `ui-primitives` 原语（图标、`StateDot`、`Menu`、`Tag`、`relativeTime`），所以两处不会各自漂移；侧栏那套组件是 harness 私有源码、发布包里也没有 `src/`，第三方插件只能这样对齐。
 
-设置段的读写走 harness 通用的 config form（`ctx.configForms.get('session-sync')`：读取、订阅推送，写入是带修订号围栏的 `mutate`），因此不碰 harness 的 RPC 表；状态、集合树、手动同步/清理与每会话记录经 host 自建的同源 HTTP API（`/session-sync/*`，普通 `fetch`）传输。Host 把偏好保留在浏览器进程内的页面（非 loopback，`mode: 'memory'`）只读展示配置、禁用全部写入控件；config form 把 host 的拒绝压成 `false`，此时页面再用插件的 `POST /session-sync/settings` 取回拒绝原因。工作区选项来自标准的 `useWorkspaces` hook。
+设置段的读写走 harness 通用的 config form（`ctx.configForms.get('session-sync')`：读取、订阅推送，写入是带修订号围栏的 `mutate`），因此不碰 harness 的 RPC 表；状态、集合树、手动同步/清理与每会话记录经 host 自建的同源 HTTP API（`/session-sync/*`，普通 `fetch`）传输。
+
+**可写性判据**：共享表单就绪且可写（`status === 'ready' && writable`）时由它自己负责写入、控件可编辑；插件自己的 `GET` / `POST /session-sync/settings` 只覆盖「共享表单还没有活的 Host 文档」的情形（加载中、不可用或已销毁）——`GET` 用该路由的 `writable` 决定展示时是否可写，`POST` 是唯一能带回 Host 拒绝原因的写入路径（config form 把拒绝压成 `false` 并丢掉原因）。harness 0.2.1-alpha.3 起 config form 快照不再带 `mode` 字段（认证过的浏览器一律把偏好持久化在 Host 文档上），0.8.1 里「非宿主模式一律禁用」的分支因此删掉了。工作区选项来自标准的 `useWorkspaces` hook。
 
 `lib/client.js` 由 `tsdown.config.ts` 打成 CJS 闭包工厂（`window.__ModuleLoader__.load`），CSS Modules 在构建期内联为 `<style data-plugin>`；构建带一条纯度门：平台模块（`react`、`ui-slots`、`ui-primitives` 等）保持 external，跨插件值导入直接构建失败。
 
