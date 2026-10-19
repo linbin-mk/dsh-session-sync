@@ -5,16 +5,32 @@
 [![npm 版本](https://img.shields.io/npm/v/@linbin-mk/dsh-session-sync)](https://www.npmjs.com/package/@linbin-mk/dsh-session-sync)
 [![许可证](https://img.shields.io/npm/l/@linbin-mk/dsh-session-sync)](LICENSE)
 
-dsh-session-sync 插件的 host 半边：DeepSeek Harness 的 git 后端自动会话同步服务（`ctx.sessionSync`）。
+<p align="center">
+  <img src="https://raw.githubusercontent.com/linbin-mk/dsh-session-sync/main/packages/session-sync/icon.png" width="88" alt="@linbin-mk/dsh-session-sync">
+</p>
 
-架构、组合与安装见[仓库 README](https://github.com/linbin-mk/dsh-session-sync#readme)，实现契约见 [`docs/spec/session-sync-v2.md`](../../docs/spec/session-sync-v2.md)。本包导出：
+DeepSeek Harness 的第三方会话同步插件：通过一个 git 仓库，在多台电脑之间同步**你亲手挑的**会话，并自带 Web 界面。**一个包同时包含 host 半边与浏览器半边**：host 是自动同步服务（`ctx.sessionSync`），浏览器半边是设置页、会话行菜单项、侧栏状态点与同步记录弹窗。
+
+![设置页的「会话同步」](https://raw.githubusercontent.com/linbin-mk/dsh-session-sync/main/docs/images/settings-sync-top.png)
+
+*设置 → 会话同步：总开关、SSH 仓库与同步集合都在这页。选中会话的入口在侧栏会话行的 `...` 菜单里。*
+
+安装（需要 DeepSeek Harness `0.2.1-rc.2`）：
+
+```sh
+dsh --profile web-sync --from-default-profile web --dump-config
+dsh plugin --profile web-sync add @linbin-mk/dsh-session-sync
+dsh --profile web-sync
+```
+
+选中的会话会出现在另一台电脑的同名工作区里；本机还没有同名工作区时，它们留在设置页的「没有同名工作区」分组里，建出同名工作区后下一个周期自动落位。完整说明、截图与常见问题见[仓库 README](https://github.com/linbin-mk/dsh-session-sync#readme)，实现契约见 [`docs/spec/session-sync-v2.md`](https://github.com/linbin-mk/dsh-session-sync/blob/main/docs/spec/session-sync-v2.md)。本包导出：
 
 - `SessionSyncService`（默认导出）：cordis 服务——读 profile 行的活配置、定时器、单飞周期、同源 HTTP 路由与 `session-sync/completed` 事件。
 - 引擎（`decideSelectionSync`、`assignWorkspaceKey`、`foldTitle`、`compareLogs`、`runSyncCycle`）、仓库格式工具（`parseSelection`/`serializeSelection`、`parseManifest`/`serializeManifest`、`parseRecords`/`mergeRecords`/`serializeRecords`、`parseState`/`serializeState`、`parseLocalSelection`/`serializeLocalSelection`）、`GitRepository`/`GitError`、配置契约（`Config`/`ConfigInput`、`SESSION_SYNC_NAMESPACE`、`readSettings`、`validateSessionSyncSettings`）。
 - 选择树投影（`buildSelectionView`、`SelectionTreeInput`）：设置页「同步会话集合」的分组规则，纯函数。
 - 切换提醒（`SWITCH_NOTICE_TEXT`、`createSwitchNoticeMessage`、`withSwitchNotice`）：为「切换电脑后首次续聊」注入一次本包自有 source kind 的 `notice` 消息。
 - HTTP 面（`registerSessionSyncRoutes`、路由常量、`parseSessionRoute`、wire 类型），挂载 `webServer` 时注册到 harness 的开放路由缝。
-- 展示元数据：`icon.svg`（两枚循环箭头的原创图形，无第三方素材）与 `locale/en.json` / `locale/zh.json`（各带 `meta.title` / `meta.description`），经 `./icon` 与 `./locale/*.json` 导出。harness 的 Plugin Manager、bundle 详情与设置页插件清单按包名直接解析这些资源，**不激活插件**就能显示本地化标题、描述与图标。
+- 展示元数据：`icon.png`（两枚对话气泡与双向箭头）与 `locale/en.json` / `locale/zh.json`（各带 `meta.title` / `meta.description`），经 `./icon` 与 `./locale/*.json` 导出。harness 的 Plugin Manager、bundle 详情与设置页插件清单按包名直接解析这些资源，**不激活插件**就能显示本地化标题、描述与图标。
 
 浏览器半边**在同一个包里**：`exports["./client"]` 是 Web 客户端加载的 bundle（`lib/client.js`），由 `dsh.client` 声明。合并前它是独立的 `@linbin-mk/dsh-client-ui-settings-sync`，v0.6.0 起并入本包，那个包不再发布新版本——升级时记得先把旧行 `dsh plugin --profile <name> remove @linbin-mk/dsh-client-ui-settings-sync` 摘掉。
 

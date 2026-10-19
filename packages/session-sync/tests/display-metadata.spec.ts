@@ -107,7 +107,7 @@ describe('plugin display metadata', () => {
   it('lists the metadata resources in the manifest allowlists', () => {
     expect(MANIFEST.exports).toHaveProperty('./icon')
     expect(MANIFEST.exports).toHaveProperty('./locale/*.json')
-    expect(MANIFEST.files).toContain('icon.svg')
+    expect(MANIFEST.files).toContain('icon.png')
     expect(MANIFEST.files).toContain('locale/*.json')
     // The runtime exports the harness composes from stay unchanged.
     expect(MANIFEST.exports).toHaveProperty('.')

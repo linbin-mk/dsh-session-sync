@@ -5,16 +5,32 @@ English | [简体中文](https://github.com/linbin-mk/dsh-session-sync/blob/main
 [![npm version](https://img.shields.io/npm/v/@linbin-mk/dsh-session-sync)](https://www.npmjs.com/package/@linbin-mk/dsh-session-sync)
 [![license](https://img.shields.io/npm/l/@linbin-mk/dsh-session-sync)](LICENSE)
 
-The host half of the dsh-session-sync plugin: a git-backed automatic session-sync service (`ctx.sessionSync`) for DeepSeek Harness.
+<p align="center">
+  <img src="https://raw.githubusercontent.com/linbin-mk/dsh-session-sync/main/packages/session-sync/icon.png" width="88" alt="@linbin-mk/dsh-session-sync">
+</p>
 
-See the [repository README](https://github.com/linbin-mk/dsh-session-sync#readme) for the architecture, composition, and installation, and [`docs/spec/session-sync-v2.md`](../../docs/spec/session-sync-v2.md) for the implementation contract. This package exports:
+A third-party session-sync plugin for DeepSeek Harness: it syncs **the sessions you picked by hand** across machines through one git repository, with its own web UI. **One package carries both halves** — the host half is the automatic sync service (`ctx.sessionSync`), and the browser half is the settings page, the session-row menu item, the sidebar status dot, and the sync-records dialog.
+
+![The Session Sync settings page](https://raw.githubusercontent.com/linbin-mk/dsh-session-sync/main/docs/images/settings-sync-top.png)
+
+*Settings → Session Sync: the master switch, the SSH remote, and the synced set all live here. Pick sessions from the sidebar session row's `...` menu.*
+
+Install (requires DeepSeek Harness `0.2.1-rc.2`):
+
+```sh
+dsh --profile web-sync --from-default-profile web --dump-config
+dsh plugin --profile web-sync add @linbin-mk/dsh-session-sync
+dsh --profile web-sync
+```
+
+A picked session shows up in the other machine's same-named workspace; while this machine has no workspace of that name, it waits in the settings page's "No matching workspace" group and lands on the next cycle after you create one. See the [repository README](https://github.com/linbin-mk/dsh-session-sync#readme) for the full guide, screenshots, and troubleshooting, and [`docs/spec/session-sync-v2.md`](https://github.com/linbin-mk/dsh-session-sync/blob/main/docs/spec/session-sync-v2.md) for the implementation contract. This package exports:
 
 - `SessionSyncService` (default): the cordis service — live configuration of the profile row, timers, single-flight cycles, the same-origin HTTP routes, and the `session-sync/completed` event.
 - The engine (`decideSelectionSync`, `assignWorkspaceKey`, `foldTitle`, `compareLogs`, `runSyncCycle`), the repo format helpers (`parseSelection`/`serializeSelection`, `parseManifest`/`serializeManifest`, `parseRecords`/`mergeRecords`/`serializeRecords`, `parseState`/`serializeState`, `parseLocalSelection`/`serializeLocalSelection`), `GitRepository`/`GitError`, and the configuration contract (`Config`/`ConfigInput`, `SESSION_SYNC_NAMESPACE`, `readSettings`, `validateSessionSyncSettings`).
 - The selection-tree projection (`buildSelectionView`, `SelectionTreeInput`): the grouping rules behind the settings page's "Synced sessions" tree, pure functions.
 - The switch notice (`SWITCH_NOTICE_TEXT`, `createSwitchNoticeMessage`, `withSwitchNotice`): one `notice` message under this package's own source kind, injected into the first chat after a machine switch.
 - The HTTP surface (`registerSessionSyncRoutes`, route constants, `parseSessionRoute`, wire types), registered on the harness's open route seam when a `webServer` is mounted.
-- Display metadata: `icon.svg` (original two-circular-arrows artwork, no third-party asset) and `locale/en.json` / `locale/zh.json` (each carrying `meta.title` / `meta.description`), exported through `./icon` and `./locale/*.json`. The harness Plugin Manager, bundle details, and Settings plugin inventory resolve these resources by package name and show the localized title, description, and icon **without activating the plugin**.
+- Display metadata: `icon.png` (two speech bubbles with counter-arrows) and `locale/en.json` / `locale/zh.json` (each carrying `meta.title` / `meta.description`), exported through `./icon` and `./locale/*.json`. The harness Plugin Manager, bundle details, and Settings plugin inventory resolve these resources by package name and show the localized title, description, and icon **without activating the plugin**.
 
 The browser half lives **in this same package**: `exports["./client"]` is the bundle the Web client loads (`lib/client.js`), declared by `dsh.client`. It used to be the separate `@linbin-mk/dsh-client-ui-settings-sync`, merged here in v0.6.0; that package receives no further releases — on upgrade, remove its old row first with `dsh plugin --profile <name> remove @linbin-mk/dsh-client-ui-settings-sync`.
 

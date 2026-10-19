@@ -60,7 +60,7 @@ describe('published tarball', () => {
     // Display metadata the Plugin Manager and Settings inventory read through
     // package exports: both must ride the tarball, or the plugin row silently
     // falls back to package-name text and generic artwork.
-    expect(packed.has('icon.svg')).toBe(true)
+    expect(packed.has('icon.png')).toBe(true)
     expect(packed.has('locale/en.json')).toBe(true)
     expect(packed.has('locale/zh.json')).toBe(true)
 

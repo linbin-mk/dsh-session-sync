@@ -44,7 +44,7 @@
       "default": "./lib/client.js"
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./icon": "./icon.svg",
+    "./icon": "./icon.png",
     "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
@@ -76,7 +76,7 @@
     "lib/client.js.map",
     "lib/**/*.d.ts",
     "cordis.patch.yml",
-    "icon.svg",
+    "icon.png",
     "locale/*.json",
     "README.md",
     "README.en.md",

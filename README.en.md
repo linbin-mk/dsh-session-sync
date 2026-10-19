@@ -1,5 +1,9 @@
 English | [简体中文](https://github.com/linbin-mk/dsh-session-sync/blob/main/README.md)
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/linbin-mk/dsh-session-sync/main/packages/session-sync/icon.png" width="72" alt="dsh-session-sync icon">
+</p>
+
 # dsh-session-sync
 
 [![npm version](https://img.shields.io/npm/v/@linbin-mk/dsh-session-sync)](https://www.npmjs.com/package/@linbin-mk/dsh-session-sync)
@@ -9,6 +13,12 @@ English | [简体中文](https://github.com/linbin-mk/dsh-session-sync/blob/main
 
 A third-party session-sync plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH): it syncs **the sessions you picked by hand** across machines through one git repository, and ships its own web UI.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/linbin-mk/dsh-session-sync/main/docs/images/settings-sync-top.png" width="820" alt="The Session Sync settings page: master switch, Git remote, branch, interval, and the synced sessions">
+</p>
+
+*Settings → Session Sync: the master switch, the SSH remote, and the synced set all live here. The entry point for picking sessions is the sidebar session row's `...` menu.*
+
 ```
 ┌───────────── machine A ─────────────┐      ┌───────────── machine B ─────────────┐
 │ DSH host ── session-sync plugin ────┼─git──┼─── session-sync plugin ── DSH host ──│
@@ -17,22 +27,71 @@ A third-party session-sync plugin for [DeepSeek Harness](https://github.com/deep
 └─────────────────────────────────────┘      └─────────────────────────────────────┘
 ```
 
+## What it does
+
+- **Pick up where you left off on another machine.** A session you picked on machine A shows up in machine B's same-named workspace through the git repository, history, title, and subagent grouping included.
+- **Sync only what you pick.** No pinning, no project mapping, no syncing the whole profile: whether a session crosses machines is decided solely by "Sync session / Session syncing" in the session row's `...` menu.
+- **Paths never travel.** The repository records only a workspace's stable key and display name; import resolves that name to the local path, and a machine path is never written into the repository.
+- **Nothing is silently lost.** Conflicts keep dual copies and are reported, logs with an open turn never leave the machine, and closing a sync, archiving, or cleanup never deletes the local session.
+
+## Three steps
+
+1. **Pick the session on machine A.** Sidebar session row `...` → "Sync session"; the plugin runs one cycle right away and pushes the session to the git repository.
+2. **Let it land on machine B.** Machine B matches the workspace by **name** and imports on its next cycle. With no same-named workspace, the session waits in the settings page's "No matching workspace" group — create one with that exact title locally and it lands on the next cycle.
+3. **Watch it whenever you like.** The "Sync status" card shows the last cycle and its result; session row `...` → "Session syncing" shows which machine pushed or pulled it and when, and closes the sync right there.
+
+> Prerequisites: both machines install this plugin, point at the same git repository, and have "Enable automatic sync" turned on in the settings page.
+
+## Screenshots
+
+### Session-row menu: you decide which session syncs
+
+![The sidebar session row's "..." menu](https://raw.githubusercontent.com/linbin-mk/dsh-session-sync/main/docs/images/session-row-menu.png)
+
+*An unsynced session reads "Sync session"; a synced one reads "Session syncing". Either opens the sync records and "Close sync".*
+
+### Settings: waiting for a matching workspace, git cleanup, and sync status
+
+![The lower half of the settings page](https://raw.githubusercontent.com/linbin-mk/dsh-session-sync/main/docs/images/settings-sync-bottom.png)
+
+*The set groups by workspace; sessions the repository holds while this machine has no same-named workspace stay as a warned group that states the remedy.*
+
+### Dark mode
+
+![The Session Sync settings page in dark mode](https://raw.githubusercontent.com/linbin-mk/dsh-session-sync/main/docs/images/settings-dark-collapsed.png)
+
+## How it works
+
+### Only the sessions you pick
+
 - **One click starts the sync.** Pick "Sync session" from the sidebar session row's `...` menu and that session joins the **cross-machine shared sync set**; open the menu again and it reads "Session syncing" — click that to pop the sync log (which machine, when, push or pull, how many events), and the dialog can close the sync right there. No pinning first, and no "project mappings" configuration of any kind.
-- **Sessions follow you, machine paths do not.** Every session exports to `workspaces/<key>/session-<id>.jsonl`; the first line is the plugin's own versioned file header, recording the workspace's stable key instead of a local path. On import the workspace **name** resolves to this machine's path, and the plugin never copies the harness JSONL backend's private files, compression, or row encoding.
 - **The set is one global source of truth.** `sync.json` at the repository root is a whole-set snapshot (not a union), and every machine mirrors it into its own selection; closing the sync on any machine propagates to all of them. To keep "who changed what" from fighting itself, each machine keeps an anchor (`state.json`) under the harness home: when its own selection changed it publishes, and when it did not it adopts the repository's.
 - **A machine that never synced only adopts, never deletes.** A machine that has not yet run a cycle (no anchor) does not read the repository's selection as "close the sync", so it cannot wipe repo artifacts by mistake. The same guard covers every later cycle that cannot publish: the anchor records only the selection that actually landed, and only after the push succeeded, so a selection this machine never held is never read as "you closed it", and a publication the remote did not accept is retried instead of being read as a removal.
+
+### How a session lands on another machine
+
+- **Sessions follow you, machine paths do not.** Every session exports to `workspaces/<key>/session-<id>.jsonl`; the first line is the plugin's own versioned file header, recording the workspace's stable key instead of a local path. On import the workspace **name** resolves to this machine's path, and the plugin never copies the harness JSONL backend's private files, compression, or row encoding.
 - **Placement is by name.** Each `workspaces/<key>/manifest.json` records that workspace's **display name**: the workspace on another machine whose title is exactly that name is the destination. Only **exactly one match** imports automatically; with no match (including when either side was renamed — renames are not adapted to), or when this machine has several workspaces with that same name (the harness allows different paths to share a title), those sessions stay in **waiting for a match** until you create a same-named workspace locally, and the next cycle places them automatically. **There is no binding UI and no local mapping is written.**
 - **No landing, no import.** In the harness a session can only attach to the workspace whose path equals the `cwd` in that session's header, and a cwd cannot be changed once created — there is no cross-workspace re-attach API either. So the plugin completes the match **before** importing and writes this machine's workspace path as the cwd; when nothing matches, the session stays in the repository as-is and waits — it never guesses a location and shoves it in first.
+
+### Data is never lost
+
 - **Conflict policy: prefix merge plus dual copies.** Session logs are append-only event streams: when one log is a strict prefix of the other, the longer wins; on a true divergence the remote tail is preserved verbatim at `conflicts/<key>/<session-id>-<host>.jsonl` and reported — data is never silently dropped. A divergent export never overwrites the repo artifact.
 - **Mid-turn logs never cross the wire.** A log that does not end with `turn/end` is either running live on its owning machine right now or crashed and awaiting the harness's interrupted-turn repair. Exporting it would publish a truncated snapshot: once imported, the harness patches in its synthetic repair tail, and that copy forks permanently from the real continuation back home. Exports therefore skip logs with an open turn (the closed log ships on a later cycle), and imports skip artifacts with an open turn.
 - **A local session is never deleted, under any circumstance.** Closing the sync, archiving, cleanup — all of them only touch the repository's artifacts and shared marks, and the local copy is kept intact.
+
+### The repository and git space
+
+- **The repository is only a transport medium.** Every cycle runs fetch → hard reset → import → export → commit → push, so git merge conflicts cannot arise. Remote-touching commands (`ls-remote`, `fetch`, `push`) retry with exponential backoff (3 attempts by default), so one transient SSH corruption no longer blanks a whole cycle.
 - **Archive marks travel, archived content retires from git.** A session archived on one machine is hidden from every machine's session list by the mark in `workspaces/<key>/archived.json`, and its repo `session-<id>.jsonl` is deleted on the next sync — archived sessions stop consuming git space. The repo mark is a grow-only union and can never conflict.
+- **Periodic git-space cleanup.** Git never forgets deleted files: archive deletion only changes HEAD, while every historical version stays in the object store forever. The cleanup rewrites the shared history down to the newest N commits (default 200) on a period (in hours) and force-pushes (`--force-with-lease`); the truncated commits leave the repository together with their blobs. The kept commits replay so the newest tree is preserved exactly — every current file is still there — and other machines re-sync from the rewritten history on their next cycle.
+
+### What using it feels like
+
 - **Imports pre-warm the projection cache.** The sync import writes persistence directly, bypassing the live session store, so the harness projection cache never folds it on its own; the plugin runs one cold-read warm-up per import (fail-soft), and list-row metadata such as the title and the subagent grouping is visible immediately — no need to open the session first.
 - **The first chat after a machine switch gets one notice.** Whenever an import brings a session new events from another machine, the plugin arms a one-shot mark for it (persisted under the harness home, so a restart keeps it). On that session's first user message — detected through the harness's `agent/pre-step` seam — a plugin `notice` message folds into the context right after the user message, telling the model that this session's history was synced from another machine, that historical paths may not match the current machine, and that the current working directory is authoritative from here on. The mark is consumed on injection. Subagent sessions are excluded.
-- **The repository is only a transport medium.** Every cycle runs fetch → hard reset → import → export → commit → push, so git merge conflicts cannot arise. Remote-touching commands (`ls-remote`, `fetch`, `push`) retry with exponential backoff (3 attempts by default), so one transient SSH corruption no longer blanks a whole cycle.
-- **Periodic git-space cleanup.** Git never forgets deleted files: archive deletion only changes HEAD, while every historical version stays in the object store forever. The cleanup rewrites the shared history down to the newest N commits (default 200) on a period (in hours) and force-pushes (`--force-with-lease`); the truncated commits leave the repository together with their blobs. The kept commits replay so the newest tree is preserved exactly — every current file is still there — and other machines re-sync from the rewritten history on their next cycle.
 - **Sync logs keep a 3-day window.** Every cycle appends start/success/failure records (counters, conflict copies, errors, duration) to `session-sync/logs/sync-YYYY-MM-DD.jsonl` under the harness home, and reads and writes prune log files outside the 3-day window; the settings page shows the recent records in a collapsible panel. In addition, **each session** has its own sync records (`workspaces/<key>/session-<id>.records.json`, newest 20) — the source of the "machine + time" in the session-row dialog — and they travel with the repository, so you can see when another machine pulled it.
-- **A localized name and icon in the plugin inventory.** `icon.svg` (original two-circular-arrows artwork) and `locale/en.json` / `locale/zh.json` (each carrying `meta.title` / `meta.description`) ship through the `./icon` and `./locale/*.json` exports, so the harness Plugin Manager, bundle details, and Settings plugin inventory show the "Session Sync / 会话同步" title, description, and icon **without activating the plugin**.
+- **A localized name and icon in the plugin inventory.** `icon.png` (two speech bubbles with counter-arrows) and `locale/en.json` / `locale/zh.json` (each carrying `meta.title` / `meta.description`) ship through the `./icon` and `./locale/*.json` exports, so the harness Plugin Manager, bundle details, and Settings plugin inventory show the "Session Sync / 会话同步" title, description, and icon **without activating the plugin**.
 - **Web surface included.** The settings page is four cards: **Sync settings** (master switch, SSH remote, branch beside the cadence), **Synced sessions**, **Git space cleanup**, and **Sync status** (Sync now and the cycle log). Every action lives with its own subject: Clean now in the cleanup card's header, Sync now in the status card's header. The collection tree uses the sidebar session tree's own anatomy — workspace rows (folder glyph, yielding to the expand arrow on hover, foldable) and 32px session rows (a status dot: red for a conflict, grey for not-held; a trailing relative last-sync time that the row's "..." menu replaces on hover — View sync records / Close sync). Sessions the repository holds while this machine has no same-named workspace stay inside the tree as **a warned group** instead of a separate list: its header names the situation and its waiting count, and one line under it states the remedy. The configuration area is still **draft-and-save**: a save bar rises from the bottom while the draft differs, edits are written only when you press Save, Reset drops them, validation (required, non-blank branch) is named beside the field, and a refused write reports in that same bar. Plus the sidebar sync status dot, the session-row menu item, and the sync-log dialog.
 
 ## Why this plugin needs no harness core patches
@@ -111,7 +170,7 @@ logs/            cycle logs
 
 - **The session event vocabulary gained two job events, and import follows.** 0.2.1-rc.2's `KNOWN_SESSION_EVENT_TYPES` adds `job/registered` and `job/settled` (the lifecycle timeline of a background job). Artifact import validates required event types against that `dsh-session` table, so on the older peer a session that had started or settled a background job was rejected outright on import as an unknown *required* type; tracking the rc.2 peer accepts it, and `tests/format.spec.ts` pins a regression test.
 
-- **The plugin inventory now has display metadata.** The package ships `icon.svg` and `locale/en.json` / `locale/zh.json`, exported through `./icon` and `./locale/*.json`; the harness Plugin Manager, bundle details, and Settings plugin inventory resolve those by package name and show the localized title, description, and icon **without activating the plugin**. When a resource is missing the harness silently falls back to package-name text and generic artwork, so `tests/display-metadata.spec.ts` asserts its resolution rules (exports, language ids, icon format, and the `files` allowlist).
+- **The plugin inventory now has display metadata.** The package ships `icon.svg` and `locale/en.json` / `locale/zh.json`, exported through `./icon` and `./locale/*.json`; the harness Plugin Manager, bundle details, and Settings plugin inventory resolve those by package name and show the localized title, description, and icon **without activating the plugin**. When a resource is missing the harness silently falls back to package-name text and generic artwork, so `tests/display-metadata.spec.ts` asserts its resolution rules (exports, language ids, icon format, and the `files` allowlist). As of 0.9.1 the icon is `icon.png` (two speech bubbles with counter-arrows), with the export and allowlist adjusted accordingly.
 
 ### 0.7.0 breaking change: tracking harness `0.2.1-alpha.2`
 
